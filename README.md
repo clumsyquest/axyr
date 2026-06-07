@@ -1,11 +1,18 @@
 # Axyr
-Le « DevTools / F12 du microcontrôleur » : une couche open-source qui capte l'état interne réel d'un MCU en temps réel et le rend lisible — pour le développeur et pour les agents IA (via MCP).
+
+The "DevTools / F12 for microcontrollers": an open-source layer that captures a microcontroller's real internal state in real time and makes it readable — for developers and for AI agents (via MCP).
+
+## Why
+Debugging embedded systems often means flying blind: a board reboots, a HardFault fires, and you're left guessing. Axyr turns that opaque failure into a clear, structured explanation — cause, function, file:line, registers — exposed both to humans and to AI agents.
 
 ## Structure
-- `firmware/`  — code embarqué (C, Zephyr) qui tourne sur la puce
-- `engine/`    — moteur hôte + serveur MCP (Rust)
-- `dashboard/` — interface web (TypeScript)
-- `docs/`      — documentation et notes de conception
+- `firmware/`  — on-device code (C, Zephyr) running on the chip
+- `engine/`    — host engine + MCP server (Rust)
+- `dashboard/` — web interface (TypeScript)
+- `docs/`      — design notes and documentation
 
-## Statut
-🚧 Pré-v1 — première cible : l'« explicateur de crash » pour STM32 (Cortex-M) sur Zephyr.
+## Status
+🚧 Pre-v1. First target: the "crash explainer" for STM32 (Cortex-M) on Zephyr.
+
+## License
+Apache-2.0
