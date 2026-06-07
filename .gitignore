@@ -1,0 +1,17 @@
+#Build
+build/
+*.o
+*.elf
+*.hex
+*.bin
+*.map
+# Rust
+target/
+# Node / TypeScript
+dist
+dist/
+*.log
+# OS / éditeur
+.DS_Store
+.vscode/
+.idea/
