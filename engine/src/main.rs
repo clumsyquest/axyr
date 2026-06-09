@@ -195,6 +195,11 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "list_peripherals",
+            "description": "List the chip's peripherals (name, address, description) from the SVD — so you can see what to pass to read_peripheral.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "read_peripheral",
             "description": "Decode a peripheral's live register state in plain language (e.g. GPIOA, USART2, RCC) using the chip's SVD: each readable register and its bit-fields with their meaning.",
             "inputSchema": {
@@ -243,6 +248,7 @@ fn dispatch_tool(
         "get_trace" => run_action(cmd_tx, Action::ReadTrace),
         "get_snapshot" => run_action(cmd_tx, Action::GetSnapshot),
         "list_variables" => run_action(cmd_tx, Action::ListVariables),
+        "list_peripherals" => run_action(cmd_tx, Action::ListPeripherals),
         "read_variable" => {
             let name = args
                 .get("name")
