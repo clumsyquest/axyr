@@ -20,6 +20,11 @@ exposes it to AI agents over MCP.
   board's hardware map: peripherals, sensors/actuators, addresses, on/off state.
 - `src/symbols.rs` — resolves a global variable to its address/size from the
   firmware ELF symbol table (generic: any ELF, any variable).
+- `src/rtt.rs` — non-intrusive telemetry over SEGGER RTT: attach to the target's
+  RTT control block and drain its up-channel without ever halting the core. This
+  is the transport that replaces the serial (UART) channel.
+- `src/bin/rtt_read.rs` — streams the firmware's RTT output to stdout
+  (`rtt_read [chip]`), a smoke test for the reader.
 - `src/bin/probe_check.rs` — hardware smoke test for the probe foundation:
   `probe_check [chip] [elf-to-flash]` (defaults to the Nucleo-F401RE).
 - `src/main.rs` — the serial listener that wires it together and writes the
