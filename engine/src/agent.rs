@@ -11,11 +11,12 @@
 //! IN_MEMORY backend leaves it in a RAM buffer, and the agent reads that buffer
 //! in one SWD block (the core is halted after the fault) — fast and log-free.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -32,6 +33,9 @@ use crate::{
 
 /// How many recent telemetry lines to keep as "what was happening just before".
 const RECENT_LOG_LINES: usize = 20;
+/// How often to record a history tick, and how many to keep (≈ last minute).
+const RECORD_INTERVAL: Duration = Duration::from_secs(1);
+const HISTORY_TICKS: usize = 60;
 /// Zephyr's IN_MEMORY coredump backend buffer symbol.
 const COREDUMP_SYMBOL: &str = "in_memory_coredump";
 
@@ -56,6 +60,8 @@ pub enum Action {
     GetHealth,
     /// Diff a fresh snapshot against the previous one.
     DiffSnapshot,
+    /// Return the recorded history (time-series of system state) for animation.
+    GetHistory,
 }
 
 /// A request to the agent: an action plus a channel to send the result back.
@@ -117,6 +123,11 @@ pub fn run(
     let mut last_crash: Option<Value> = None;
     let mut last_snapshot: Option<Value> = None;
     let mut link_errors = 0u32;
+    // History: a rolling time-series of system state, for the dashboard to
+    // animate ("the system over time", not just one frame).
+    let mut history: VecDeque<Value> = VecDeque::new();
+    let record_start = Instant::now();
+    let mut last_record = record_start;
     let mut line = String::new();
     let mut buf = [0u8; 1024];
 
@@ -203,9 +214,24 @@ pub fn run(
                 Action::GetHealth => {
                     build_health(&mut probe, svd.as_ref(), &threads, last_crash.as_ref())
                 }
+                Action::GetHistory => {
+                    serde_json::to_string_pretty(&Value::Array(history.iter().cloned().collect()))
+                        .map_err(|e| format!("serialize history: {e}"))
+                }
                 other => execute(&mut probe, other, svd.as_ref(), &cfg.elf),
             };
             let _ = cmd.reply.send(result);
+        }
+
+        // Record a history tick at the configured cadence.
+        if last_record.elapsed() >= RECORD_INTERVAL {
+            let t_ms = record_start.elapsed().as_millis() as u64;
+            let tick = capture_tick(&mut probe, &cfg, &threads, t_ms);
+            if history.len() >= HISTORY_TICKS {
+                history.pop_front();
+            }
+            history.push_back(tick);
+            last_record = Instant::now();
         }
 
         thread::sleep(Duration::from_millis(10));
@@ -393,6 +419,26 @@ fn build_snapshot(
     Ok(snapshot)
 }
 
+/// Capture one history tick: the dynamic system state at time `t_ms`. Light
+/// enough to record every second (threads + watched variables + core state);
+/// the dashboard replays these to animate the system over time.
+fn capture_tick(
+    probe: &mut Probe,
+    cfg: &Config,
+    threads: &Arc<Mutex<ThreadTable>>,
+    t_ms: u64,
+) -> Value {
+    let threads_json = threads.lock().map(|t| t.to_json()).unwrap_or_else(|_| json!([]));
+    let variables = read_watch(probe, &cfg.elf, &cfg.watch);
+    let core = match probe.status() {
+        Ok(s) if s.contains("Running") => "running",
+        Ok(s) if s.contains("Sleeping") => "sleeping",
+        Ok(s) if s.contains("Halted") => "halted",
+        _ => "unknown",
+    };
+    json!({ "t_ms": t_ms, "core": core, "threads": threads_json, "variables": variables })
+}
+
 /// Run proactive health checks over the captured state.
 fn build_health(
     probe: &mut Probe,
@@ -554,6 +600,7 @@ fn execute(
         Action::GetSnapshot => Err("internal: snapshot handled elsewhere".to_string()),
         Action::GetHealth => Err("internal: health handled elsewhere".to_string()),
         Action::DiffSnapshot => Err("internal: diff handled elsewhere".to_string()),
+        Action::GetHistory => Err("internal: history handled elsewhere".to_string()),
         Action::ReadTrace => {
             let head = symbols::resolve(elf, "axyr_trace_head")?;
             let ring = symbols::resolve(elf, "axyr_trace")?;
