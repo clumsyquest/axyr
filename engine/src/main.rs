@@ -47,6 +47,11 @@ fn main() {
     });
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
     let svd_path = env::var("AXYR_SVD").ok();
+    // Where the agent may discover flashable firmware images (defaults to the
+    // ELF's directory) — so flashing is autonomous, no human supplies a path.
+    let firmware_dir = env::var("AXYR_FIRMWARE_DIR")
+        .ok()
+        .or_else(|| std::path::Path::new(&elf).parent().map(|p| p.display().to_string()));
     let watch = env::var("AXYR_WATCH")
         .map(|s| {
             s.split(',')
@@ -70,13 +75,14 @@ fn main() {
     let threads_agent = threads.clone();
     thread::spawn(move || agent::run(probe, cfg, cmd_rx, threads_agent));
 
-    serve_mcp(&crash_file, dts.as_deref(), &cmd_tx, &threads);
+    serve_mcp(&crash_file, dts.as_deref(), firmware_dir.as_deref(), &cmd_tx, &threads);
 }
 
 /// MCP over stdio: one JSON-RPC message per line.
 fn serve_mcp(
     crash_file: &str,
     dts: Option<&str>,
+    firmware_dir: Option<&str>,
     cmd_tx: &Sender<Command>,
     threads: &Arc<Mutex<ThreadTable>>,
 ) {
@@ -116,7 +122,8 @@ fn serve_mcp(
             "tools/call" => {
                 let tool = req.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
                 let args = req.pointer("/params/arguments").cloned().unwrap_or(json!({}));
-                let result = dispatch_tool(tool, &args, crash_file, dts, cmd_tx, threads);
+                let result =
+                    dispatch_tool(tool, &args, crash_file, dts, firmware_dir, cmd_tx, threads);
                 Some(match result {
                     Ok(text) => json!({
                         "jsonrpc": "2.0", "id": id,
@@ -159,6 +166,11 @@ fn tool_definitions() -> Value {
         {
             "name": "reboot_board",
             "description": "Reset the target board over the debug probe and let it run.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "list_firmware",
+            "description": "List flashable firmware images (.elf/.bin) available on the host — so you can pick a path for flash_firmware without a human.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -230,10 +242,12 @@ fn dispatch_tool(
     args: &Value,
     crash_file: &str,
     dts: Option<&str>,
+    firmware_dir: Option<&str>,
     cmd_tx: &Sender<Command>,
     threads: &Arc<Mutex<ThreadTable>>,
 ) -> Result<String, String> {
     match tool {
+        "list_firmware" => list_firmware(firmware_dir),
         "get_last_crash" => Ok(fs::read_to_string(crash_file)
             .unwrap_or_else(|_| "No crash recorded yet.".to_string())),
         "get_threads" => Ok(threads
@@ -295,6 +309,30 @@ fn run_action(cmd_tx: &Sender<Command>, action: Action) -> Result<String, String
         .send(Command { action, reply })
         .map_err(|_| "agent thread is gone".to_string())?;
     rx.recv().map_err(|_| "no reply from agent thread".to_string())?
+}
+
+/// List flashable firmware images (.elf/.bin) in the configured directory, so an
+/// autonomous agent can choose a path for `flash_firmware`.
+fn list_firmware(dir: Option<&str>) -> Result<String, String> {
+    let dir = dir.ok_or("no firmware directory (set AXYR_FIRMWARE_DIR)")?;
+    let mut images: Vec<(String, u64)> = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("read dir {dir}: {e}"))? {
+        let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
+        let path = entry.path();
+        if matches!(path.extension().and_then(|e| e.to_str()), Some("elf") | Some("bin")) {
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            images.push((path.display().to_string(), size));
+        }
+    }
+    images.sort();
+    if images.is_empty() {
+        return Ok(format!("No firmware images (.elf/.bin) in {dir}"));
+    }
+    let mut out = format!("Flashable firmware in {dir}:\n");
+    for (path, size) in images {
+        out.push_str(&format!("  {path}  ({size} bytes)\n"));
+    }
+    Ok(out.trim_end().to_string())
 }
 
 /// Parse a memory address given as hex ("0x...") or decimal.
