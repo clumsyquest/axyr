@@ -16,14 +16,17 @@ exposes it to AI agents over MCP.
 - `src/probe.rs` — debug-probe (SWD) access via `probe-rs`: attach to a running
   core, read live memory/registers, reset, and flash. The foundation for live
   system state and for agent actions (flash/reboot/debug).
+- `src/system_map.rs` — parses the Zephyr devicetree (`zephyr.dts`) into the
+  board's hardware map: peripherals, sensors/actuators, addresses, on/off state.
 - `src/bin/probe_check.rs` — hardware smoke test for the probe foundation:
   `probe_check [chip] [elf-to-flash]` (defaults to the Nucleo-F401RE).
 - `src/main.rs` — the serial listener that wires it together and writes the
   "last crash" file.
-- `src/bin/mcp.rs` — an MCP server (stdio) exposing the post-mortem and board
-  actions to an AI agent: `get_last_crash` (read), plus `reboot_board`,
+- `src/bin/mcp.rs` — an MCP server (stdio) exposing the system to an AI agent:
+  `get_last_crash` and `get_system_map` (reads), plus `reboot_board`,
   `flash_firmware`, and `read_memory` which drive the board over the debug probe.
-  Each action attaches the probe per-call; set `AXYR_CHIP` to target another board.
+  Probe actions attach per-call; set `AXYR_CHIP` for another chip and `AXYR_DTS`
+  to the `zephyr.dts` path for `get_system_map`.
 
 ## Build & test
 

@@ -20,6 +20,7 @@ use std::io::{self, BufRead, Write};
 use serde_json::{Value, json};
 
 use axyr_engine::probe::{DEFAULT_CHIP, Probe};
+use axyr_engine::system_map;
 
 fn main() {
     // The crash file that the serial listener keeps up to date.
@@ -29,6 +30,8 @@ fn main() {
     });
     // The target chip for probe actions (overridable for other boards).
     let chip = env::var("AXYR_CHIP").unwrap_or_else(|_| DEFAULT_CHIP.to_string());
+    // Path to the Zephyr devicetree (build/zephyr/zephyr.dts) for the system map.
+    let dts = env::var("AXYR_DTS").ok();
 
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -70,7 +73,7 @@ fn main() {
             "tools/call" => {
                 let tool = req.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
                 let args = req.pointer("/params/arguments").cloned().unwrap_or(json!({}));
-                let result = dispatch_tool(tool, &args, &crash_file, &chip);
+                let result = dispatch_tool(tool, &args, &crash_file, &chip, dts.as_deref());
                 Some(match result {
                     Ok(text) => json!({
                         "jsonrpc": "2.0", "id": id,
@@ -100,6 +103,11 @@ fn tool_definitions() -> Value {
         {
             "name": "get_last_crash",
             "description": "Return the most recent crash captured from the board (cause, source location, call stack, and recent serial output).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "get_system_map",
+            "description": "Return the board's hardware map from the Zephyr devicetree: the peripherals (I2C/SPI/UART/timers/GPIO) and the sensors/actuators on them, with addresses and on/off state.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -135,10 +143,21 @@ fn tool_definitions() -> Value {
 
 /// Route a tool call to its handler. Returns Ok(text) or Err(text); the caller
 /// maps Err to an MCP error result so the agent sees the failure as data.
-fn dispatch_tool(tool: &str, args: &Value, crash_file: &str, chip: &str) -> Result<String, String> {
+fn dispatch_tool(
+    tool: &str,
+    args: &Value,
+    crash_file: &str,
+    chip: &str,
+    dts: Option<&str>,
+) -> Result<String, String> {
     match tool {
         "get_last_crash" => Ok(fs::read_to_string(crash_file)
             .unwrap_or_else(|_| "No crash recorded yet.".to_string())),
+        "get_system_map" => {
+            let path = dts.ok_or("system map not configured (set AXYR_DTS)")?;
+            let dts_src = fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+            system_map::render(&dts_src).ok_or_else(|| "could not parse devicetree".to_string())
+        }
         "reboot_board" => {
             let mut probe = Probe::attach(chip)?;
             probe.reset()?;
