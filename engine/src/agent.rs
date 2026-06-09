@@ -37,6 +37,8 @@ pub enum Action {
     ReadMemory { address: u64, count: usize },
     /// Decode a peripheral's live register state via the SVD.
     ReadPeripheral { name: String },
+    /// Read a global variable live by name (resolved from the ELF).
+    ReadVariable { name: String },
 }
 
 /// A request to the agent: an action plus a channel to send the result back.
@@ -124,7 +126,7 @@ pub fn run(
         // 3. Run any queued actions, interleaved between drains. RTT keeps
         //    buffering on the target while we do, so nothing is lost.
         while let Ok(cmd) = commands.try_recv() {
-            let result = execute(&mut probe, cmd.action, svd.as_ref());
+            let result = execute(&mut probe, cmd.action, svd.as_ref(), &cfg.elf);
             let _ = cmd.reply.send(result);
         }
 
@@ -189,6 +191,7 @@ fn execute(
     probe: &mut Probe,
     action: Action,
     svd: Option<&svd_parser::svd::Device>,
+    elf: &str,
 ) -> Result<String, String> {
     match action {
         Action::Reboot => {
@@ -211,6 +214,24 @@ fn execute(
         Action::ReadPeripheral { name } => {
             let device = svd.ok_or("peripheral decode not configured (set AXYR_SVD)")?;
             peripheral::decode(device, &name, |addr| probe.read_word(addr))
+        }
+        Action::ReadVariable { name } => {
+            // Resolve the global from the ELF, then read it live over SWD. A
+            // background read works while the core runs or sleeps — no halt,
+            // non-intrusive.
+            let sym = symbols::resolve(elf, &name)?;
+            let words = (sym.size.max(1) as usize).div_ceil(4).clamp(1, 64);
+            let mut buf = vec![0u32; words];
+            probe.read_words(sym.address, &mut buf)?;
+            let mut out = format!("{} @{:#010x} ({} bytes) =", sym.name, sym.address, sym.size);
+            if sym.size <= 4 {
+                out.push_str(&format!(" {:#010x} ({})", buf[0], buf[0]));
+            } else {
+                for w in &buf {
+                    out.push_str(&format!(" {w:#010x}"));
+                }
+            }
+            Ok(out)
         }
     }
 }

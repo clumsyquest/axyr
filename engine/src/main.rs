@@ -154,6 +154,15 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "read_variable",
+            "description": "Read a firmware global variable live by name: resolves its address from the ELF and reads it over SWD (works while the core runs or sleeps, no halt).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "The global variable's symbol name, e.g. \"axyr_counter\"." } },
+                "required": ["name"]
+            }
+        },
+        {
             "name": "read_peripheral",
             "description": "Decode a peripheral's live register state in plain language (e.g. GPIOA, USART2, RCC) using the chip's SVD: each readable register and its bit-fields with their meaning.",
             "inputSchema": {
@@ -198,6 +207,13 @@ fn dispatch_tool(
             let path = dts.ok_or("system map not configured (set AXYR_DTS)")?;
             let src = fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
             system_map::render(&src).ok_or_else(|| "could not parse devicetree".to_string())
+        }
+        "read_variable" => {
+            let name = args
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("missing required argument: name")?;
+            run_action(cmd_tx, Action::ReadVariable { name: name.to_string() })
         }
         "read_peripheral" => {
             let name = args
