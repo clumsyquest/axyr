@@ -1,8 +1,9 @@
 use std::env;
 use std::fs;
 use std::io::{self, Read};
-use std::process::Command;
 use std::time::Duration;
+
+use axyr_engine::{format_report, parse_crash_line, symbolize};
 
 fn main() {
     // Expect: axyr-engine <serial-port> <elf> <addr2line> <crash-file>
@@ -46,31 +47,9 @@ fn main() {
 }
 
 fn handle_line(line: &str, elf: &str, addr2line: &str, crash_file: &str) {
-    let Some(fields) = line.strip_prefix("AXYR_CRASH ") else { return; };
-
-    let mut pc: Option<&str> = None;
-    let mut reason: Option<&str> = None;
-    for token in fields.split_whitespace() {
-        if let Some((key, value)) = token.split_once('=') {
-            match key {
-                "pc" => pc = Some(value),
-                "reason" => reason = Some(value),
-                _ => {}
-            }
-        }
-    }
-
-    let Some(pc) = pc else { eprintln!("crash line has no pc field"); return; };
-
-    let output = Command::new(addr2line)
-        .args(["-e", elf, "-f", "-p", pc])
-        .output()
-        .expect("failed to run addr2line");
-    let location = String::from_utf8_lossy(&output.stdout);
-    let location = location.trim();
-
-    // Build a one-line report: print it AND save it as "the last crash".
-    let report = format!("reason {} — {}", reason.unwrap_or("?"), location);
+    let Some(crash) = parse_crash_line(line) else { return; };
+    let location = symbolize(addr2line, elf, &crash.pc);
+    let report = format_report(&crash, &location);
     println!("=== AXYR crash report ===\n{report}");
     if let Err(e) = fs::write(crash_file, report.as_bytes()) {
         eprintln!("could not write crash file: {e}");
