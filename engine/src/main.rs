@@ -40,9 +40,11 @@ fn main() {
 
     let chip = env::var("AXYR_CHIP").unwrap_or_else(|_| DEFAULT_CHIP.to_string());
     let dts = env::var("AXYR_DTS").ok();
+    // Crash backtraces use native DWARF unwinding (no toolchain needed); GDB is
+    // an optional fallback when these env vars point at Zephyr's coredump tools.
     let coredump = CoredumpTools::from_env(&elf);
     if coredump.is_none() {
-        eprintln!("note: coredump tools not configured; call stack disabled");
+        eprintln!("note: GDB coredump fallback not configured; using native unwinding only");
     }
 
     // The agent owns the probe; we keep only the command sender.

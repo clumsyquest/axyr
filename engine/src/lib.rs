@@ -10,6 +10,7 @@ pub mod symbols;
 pub mod threads;
 pub mod system_map;
 pub mod trace;
+pub mod unwind;
 
 /// A crash captured from the device.
 pub struct Crash {

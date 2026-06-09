@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::coredump::{CoredumpTools, resolve_backtrace_from_bin};
+use crate::unwind;
 use crate::probe::Probe;
 use crate::recent_log::RecentLog;
 use crate::rtt::Telemetry;
@@ -187,6 +188,11 @@ pub fn run(
         // 3. Run any queued actions, interleaved between drains. RTT keeps
         //    buffering on the target while we do, so nothing is lost.
         while let Ok(cmd) = commands.try_recv() {
+            // Reboot/Flash restart the firmware, which re-initializes the RTT
+            // control block; we re-attach telemetry afterwards so the host
+            // re-syncs to the fresh buffers and doesn't miss the boot output
+            // (e.g. a crash packet emitted milliseconds after reset).
+            let resets_target = matches!(cmd.action, Action::Reboot | Action::Flash(_));
             let result = match cmd.action {
                 Action::GetSnapshot => {
                     match build_snapshot(&mut probe, &cfg, svd.as_ref(), &threads, last_crash.as_ref()) {
@@ -221,6 +227,14 @@ pub fn run(
                 }
                 other => execute(&mut probe, other, svd.as_ref(), &cfg.elf),
             };
+            if resets_target && result.is_ok() {
+                // Let the firmware re-init RTT, then re-attach to re-sync buffers.
+                thread::sleep(Duration::from_millis(50));
+                match Telemetry::attach(probe.session_mut()) {
+                    Ok(t) => telemetry = t,
+                    Err(e) => eprintln!("agent: RTT re-attach after reset failed: {e}"),
+                }
+            }
             let _ = cmd.reply.send(result);
         }
 
@@ -266,20 +280,23 @@ fn report_crash(
     let mut report = format_report(crash, &location);
 
     // Read the in-memory coredump (core is halted after the fault) and unwind it.
+    // Native unwinding (gimli over the ELF's DWARF CFI, reading the stack over
+    // SWD) is the primary path, so the engine needs no toolchain at runtime; GDB
+    // is used only as a fallback when it's configured and the native path fails.
     let mut backtrace: Option<String> = None;
-    if let (Some(addr), Some(tools)) = (coredump_addr, cfg.coredump.as_ref()) {
+    if let Some(addr) = coredump_addr {
         match probe.read_in_memory_coredump(addr) {
-            Ok(Some(dump)) => match resolve_backtrace_from_bin(tools, &dump) {
-                Ok(bt) => {
-                    report.push_str("\nCall stack:\n");
-                    report.push_str(&bt);
-                    backtrace = Some(bt);
-                }
-                Err(e) => eprintln!("agent: backtrace: {e}"),
-            },
+            Ok(Some(dump)) => {
+                backtrace = native_backtrace(probe, &cfg.elf, &dump)
+                    .or_else(|| gdb_backtrace(cfg.coredump.as_ref(), &dump));
+            }
             Ok(None) => eprintln!("agent: no valid coredump in RAM"),
             Err(e) => eprintln!("agent: read coredump: {e}"),
         }
+    }
+    if let Some(bt) = &backtrace {
+        report.push_str("\nCall stack:\n");
+        report.push_str(bt);
     }
 
     let telemetry = recent_log.snapshot();
@@ -303,6 +320,29 @@ fn report_crash(
         "registers": { "pc": crash.pc },
         "recent_telemetry": telemetry.lines().collect::<Vec<_>>(),
     }))
+}
+
+/// Native backtrace: parse registers from the coredump, then unwind via DWARF
+/// CFI, reading stack words over SWD (the core is halted after the fault). No
+/// external toolchain. Returns `None` (with a note) if it can't produce frames.
+fn native_backtrace(probe: &mut Probe, elf: &str, dump: &[u8]) -> Option<String> {
+    let regs = unwind::parse_registers(dump)
+        .map_err(|e| eprintln!("agent: native unwind (registers): {e}"))
+        .ok()?;
+    let frames = unwind::backtrace(elf, &regs, |addr| probe.read_word(addr as u64).ok(), 32)
+        .map_err(|e| eprintln!("agent: native unwind: {e}"))
+        .ok()?;
+    if frames.is_empty() {
+        return None;
+    }
+    Some(unwind::format_backtrace(&frames))
+}
+
+/// GDB fallback: drive Zephyr's offline coredump tooling, if it's configured.
+fn gdb_backtrace(tools: Option<&CoredumpTools>, dump: &[u8]) -> Option<String> {
+    resolve_backtrace_from_bin(tools?, dump)
+        .map_err(|e| eprintln!("agent: gdb backtrace fallback: {e}"))
+        .ok()
 }
 
 /// Parse "function at file:line" into {function, file, line}.
