@@ -26,19 +26,20 @@ exposes it to AI agents over MCP.
   "last crash" file.
 - `src/bin/mcp.rs` — an MCP server (stdio) exposing the system to an AI agent:
   `get_last_crash` and `get_system_map` (reads), plus `reboot_board`,
-  `flash_firmware`, `read_memory`, and `read_variable` (resolve a global from the
-  ELF and read it live). Probe actions attach per-call; set `AXYR_CHIP` for
-  another chip, `AXYR_DTS` for `get_system_map`, and `AXYR_ELF` for
-  `read_variable`.
+  `flash_firmware`, and `read_memory` which drive the board over the debug probe.
+  Probe actions attach per-call; set `AXYR_CHIP` for another chip and `AXYR_DTS`
+  for `get_system_map`.
 
-### Reading live state (the overhead caveat)
+### Live state: non-intrusive reads are an open problem
 
-On the Nucleo's ST-LINK, SRAM is only debugger-visible while the core is
-**halted** — a running/sleeping core returns zeros for AHB memory (the CPU's own
-registers, e.g. CPUID, stay readable). So `read_variable` takes a snapshot with a
-brief **halt → read → resume** (sub-millisecond). Truly zero-overhead background
-reads need a different probe (J-Link) or an RTT channel. This is the real
-"capture without overhead" challenge.
+Reading live SRAM (variables) must NOT disturb the target — halting the CPU, even
+briefly, is unacceptable for real-time/industrial use. On this ST-LINK, reads
+only return correct SRAM while the core is halted; a running/sleeping core reads
+zeros for AHB memory (the CPU's own registers, e.g. CPUID, stay readable). We are
+investigating a **deterministic, non-intrusive** path (background AHB access vs.
+an RTT channel) rather than shipping a halting workaround. `symbols.rs` (resolve a
+global to its address from the ELF) is the non-intrusive half, ready to plug into
+whatever read mechanism we settle on.
 
 ## Build & test
 
