@@ -11,6 +11,8 @@ exposes it to AI agents over MCP.
   tested (no hardware needed: `cargo test`).
 - `src/coredump.rs` — capture the Zephyr coredump block from the serial stream
   and resolve it into a call stack by driving Zephyr's tooling + GDB offline.
+- `src/recent_log.rs` — a ring buffer of recent serial output, attached to the
+  report as "what was happening just before the crash".
 - `src/main.rs` — the serial listener that wires it together and writes the
   "last crash" file.
 - `src/bin/mcp.rs` — a small MCP server exposing `get_last_crash`, which simply

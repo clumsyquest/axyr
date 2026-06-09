@@ -4,7 +4,11 @@ use std::io::{self, Read};
 use std::time::Duration;
 
 use axyr_engine::coredump::{CoredumpCollector, CoredumpTools, resolve_backtrace};
+use axyr_engine::recent_log::RecentLog;
 use axyr_engine::{format_report, parse_crash_line, symbolize};
+
+/// How many recent serial lines to keep as "what was happening just before".
+const RECENT_LOG_LINES: usize = 20;
 
 fn main() {
     // Expect: axyr-engine <serial-port> <elf> <addr2line> <crash-file>
@@ -29,6 +33,8 @@ fn main() {
     // Holds the most recent backtrace; the coredump block arrives just before
     // the AXYR_CRASH line, so it is ready by the time we build the report.
     let mut last_backtrace: Option<String> = None;
+    // Rolling window of recent serial output, attached to the next crash report.
+    let mut recent_log = RecentLog::new(RECENT_LOG_LINES);
 
     let mut port = serialport::new(port_path, 115200)
         .timeout(Duration::from_millis(200))
@@ -53,6 +59,7 @@ fn main() {
                                 cd_tools.as_ref(),
                                 &mut collector,
                                 &mut last_backtrace,
+                                &mut recent_log,
                             );
                             line.clear();
                         }
@@ -76,7 +83,12 @@ fn handle_line(
     cd_tools: Option<&CoredumpTools>,
     collector: &mut CoredumpCollector,
     last_backtrace: &mut Option<String>,
+    recent_log: &mut RecentLog,
 ) {
+    // Keep the rolling window of serial output up to date (the recorder skips
+    // crash machinery itself).
+    recent_log.record(line);
+
     // Feed the coredump collector first; a full block resolves into a backtrace
     // that we attach to the next crash report.
     if let (Some(block), Some(tools)) = (collector.feed(line), cd_tools) {
@@ -92,6 +104,10 @@ fn handle_line(
     if let Some(bt) = last_backtrace.take() {
         report.push_str("\nCall stack:\n");
         report.push_str(&bt);
+    }
+    if !recent_log.is_empty() {
+        report.push_str("\nRecent serial output:\n");
+        report.push_str(&recent_log.snapshot());
     }
 
     println!("=== AXYR crash report ===\n{report}");
