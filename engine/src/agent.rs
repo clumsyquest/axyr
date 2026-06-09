@@ -62,6 +62,8 @@ pub enum Action {
     DiffSnapshot,
     /// Return the recorded history (time-series of system state) for animation.
     GetHistory,
+    /// Non-intrusive trigger: poll a global until it reaches `value` (or timeout).
+    WatchUntil { name: String, value: u32 },
 }
 
 /// A request to the agent: an action plus a channel to send the result back.
@@ -601,6 +603,23 @@ fn execute(
         Action::GetHealth => Err("internal: health handled elsewhere".to_string()),
         Action::DiffSnapshot => Err("internal: diff handled elsewhere".to_string()),
         Action::GetHistory => Err("internal: history handled elsewhere".to_string()),
+        Action::WatchUntil { name, value } => {
+            // Non-intrusive trigger: poll the global with background reads (no
+            // halt) until it reaches the value, bounded by a timeout. A true
+            // hardware watchpoint would halt the core (intrusive) without SWO.
+            let sym = symbols::resolve(elf, &name)?;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let v = probe.read_word(sym.address)?;
+                if v == value {
+                    return Ok(format!("Triggered: {name} = {value} ({value:#x})"));
+                }
+                if Instant::now() >= deadline {
+                    return Ok(format!("Timeout (10s): {name} = {v} ({v:#x}), waited for {value}"));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
         Action::ReadTrace => {
             let head = symbols::resolve(elf, "axyr_trace_head")?;
             let ring = symbols::resolve(elf, "axyr_trace")?;

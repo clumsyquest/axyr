@@ -169,6 +169,18 @@ fn tool_definitions() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "watch_until",
+            "description": "Non-intrusive trigger: poll a global variable until it reaches a value (or 10s timeout), without halting the core. Useful to wait for a condition before inspecting.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Global variable name." },
+                    "value": { "type": "integer", "description": "Value to wait for." }
+                },
+                "required": ["name", "value"]
+            }
+        },
+        {
             "name": "list_firmware",
             "description": "List flashable firmware images (.elf/.bin) available on the host — so you can pick a path for flash_firmware without a human.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -263,6 +275,17 @@ fn dispatch_tool(
 ) -> Result<String, String> {
     match tool {
         "list_firmware" => list_firmware(firmware_dir),
+        "watch_until" => {
+            let name = args
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("missing required argument: name")?;
+            let value = args
+                .get("value")
+                .and_then(Value::as_u64)
+                .ok_or("missing required argument: value")? as u32;
+            run_action(cmd_tx, Action::WatchUntil { name: name.to_string(), value })
+        }
         "get_last_crash" => Ok(fs::read_to_string(crash_file)
             .unwrap_or_else(|_| "No crash recorded yet.".to_string())),
         "get_threads" => Ok(threads
