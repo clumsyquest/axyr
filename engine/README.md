@@ -13,6 +13,11 @@ exposes it to AI agents over MCP.
   and resolve it into a call stack by driving Zephyr's tooling + GDB offline.
 - `src/recent_log.rs` — a ring buffer of recent serial output, attached to the
   report as "what was happening just before the crash".
+- `src/probe.rs` — debug-probe (SWD) access via `probe-rs`: attach to a running
+  core, read live memory/registers, reset, and flash. The foundation for live
+  system state and for agent actions (flash/reboot/debug).
+- `src/bin/probe_check.rs` — hardware smoke test for the probe foundation:
+  `probe_check [chip] [elf-to-flash]` (defaults to the Nucleo-F401RE).
 - `src/main.rs` — the serial listener that wires it together and writes the
   "last crash" file.
 - `src/bin/mcp.rs` — a small MCP server exposing `get_last_crash`, which simply
