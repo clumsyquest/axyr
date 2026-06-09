@@ -1,0 +1,118 @@
+{
+  "_comment": "Example Axyr system snapshot — the data contract the dashboard and the AI agent consume. Values are real captures from a Nucleo-F401RE this session. 'status: live' = recoverable today; 'status: planned' = designed, not yet wired.",
+  "axyr_version": "0.1.0",
+  "captured_at": "2026-06-09T16:50:00Z",
+
+  "device": {
+    "status": "live",
+    "board": "STMicroelectronics STM32F401RE-NUCLEO",
+    "chip": "STM32F401RETx",
+    "core": "ARM Cortex-M4F",
+    "cpuid": "0x410fc241",
+    "probe": "ST-LINK/V2.1",
+    "transport": "RTT (non-intrusive, no CPU halt)"
+  },
+
+  "state": {
+    "status": "live",
+    "core": "crashed",
+    "summary": "Bus fault: invalid memory access (precise)"
+  },
+
+  "system_map": {
+    "status": "live (categories/kind = planned enrichment from Zephyr bindings)",
+    "source": "Zephyr devicetree (zephyr.dts)",
+    "buses": [
+      { "label": "i2c1", "alias": "arduino_i2c", "kind": "i2c", "compatible": "st,stm32-i2c-v1", "address": "0x40005400", "status": "okay", "devices": [] },
+      { "label": "i2c3", "kind": "i2c", "compatible": "st,stm32-i2c-v1", "address": "0x40005c00", "status": "okay", "devices": [] },
+      { "label": "spi1", "alias": "arduino_spi", "kind": "spi", "compatible": "st,stm32-spi", "address": "0x40013000", "status": "okay", "devices": [] }
+    ],
+    "peripherals": [
+      { "label": "usart1", "kind": "uart", "compatible": "st,stm32-usart", "address": "0x40011000", "status": "okay" },
+      { "label": "usart2", "kind": "uart", "compatible": "st,stm32-usart", "address": "0x40004400", "status": "okay" },
+      { "label": "adc1", "kind": "adc", "compatible": "st,stm32f4-adc", "address": "0x40012000", "status": "okay" },
+      { "label": "timers2", "kind": "timer", "compatible": "st,stm32-timers", "address": "0x40000000", "status": "okay", "children": ["pwm2"] },
+      { "label": "rtc", "kind": "rtc", "compatible": "st,stm32-rtc", "address": "0x40002800", "status": "okay" },
+      { "label": "gpioa..gpioh", "kind": "gpio", "compatible": "st,stm32-gpio", "address": "0x40020000..0x40021c00", "status": "okay" },
+      { "label": "wwdg", "kind": "watchdog", "compatible": "st,stm32-window-watchdog", "address": "0x40002c00", "status": "okay" }
+    ],
+    "sensors": [
+      { "label": "die_temp", "kind": "sensor", "compatible": "st,stm32-temp-cal", "role": "on-die temperature" }
+    ],
+    "actuators": [
+      { "label": "leds", "kind": "led", "compatible": "gpio-leds" },
+      { "label": "pwmleds", "kind": "led", "compatible": "pwm-leds" }
+    ],
+    "inputs": [
+      { "label": "gpio_keys", "kind": "button", "compatible": "gpio-keys" }
+    ],
+    "memory_regions": [
+      { "label": "flash0", "kind": "flash", "address": "0x08000000", "size": "512 KiB" },
+      { "label": "sram0", "kind": "ram", "address": "0x20000000", "size": "96 KiB" }
+    ],
+    "disabled": ["i2c2", "spi2", "spi3", "spi4", "usart6", "timers1", "timers3", "timers4", "timers5", "iwdg", "dma1", "dma2", "sdmmc1", "usbotg_fs"]
+  },
+
+  "live": {
+    "telemetry": {
+      "status": "live",
+      "channel": "RTT",
+      "recent": [
+        "*** Booting Zephyr OS build v4.4.0 ***",
+        "counter=44",
+        "counter=45",
+        "counter=46",
+        "counter=47"
+      ]
+    },
+    "memory": {
+      "status": "live (registers/peripherals readable while running)",
+      "reads": [
+        { "name": "SCB CPUID", "address": "0xE000ED00", "value": "0x410fc241" },
+        { "name": "SCB ICSR", "address": "0xE000ED04", "value": "0x0400f805" }
+      ]
+    },
+    "variables": {
+      "status": "planned (deterministic watch via a low-priority on-device sampler over RTT)",
+      "watch": [
+        { "name": "axyr_counter", "address": "0x20000220", "type": "uint32", "value": null }
+      ]
+    }
+  },
+
+  "crash": {
+    "status": "live",
+    "cause": "Bus fault: invalid memory access (precise)",
+    "reason_code": 25,
+    "fault_address": "0xbadcafe0",
+    "location": { "function": "i2c_read_reg", "file": "firmware/crash_demo/src/main.c", "line": 30 },
+    "call_stack": [
+      { "frame": 0, "function": "i2c_read_reg", "file": "firmware/crash_demo/src/main.c", "line": 30 },
+      { "frame": 1, "function": "read_sensor", "file": "firmware/crash_demo/src/main.c", "line": 36 },
+      { "frame": 2, "function": "main", "file": "firmware/crash_demo/src/main.c", "line": 43 }
+    ],
+    "registers": {
+      "pc": "0x0800046a", "lr": "0x080004b5", "xpsr": "0x61000000",
+      "r0": "0x00000001", "r1": "0x00000000", "r2": "0x00000002", "r3": "0xbadca000", "r12": "0x00000000"
+    },
+    "recent_telemetry": [
+      "*** Booting Zephyr OS build v4.4.0 ***",
+      "About to crash...",
+      "<err> os: ***** BUS FAULT *****",
+      "<err> os:   Precise data bus error",
+      "<err> os:   BFAR Address: 0xbadcafe0"
+    ]
+  },
+
+  "actions": {
+    "status": "live",
+    "transport": "MCP",
+    "available": [
+      { "name": "get_last_crash", "kind": "read" },
+      { "name": "get_system_map", "kind": "read" },
+      { "name": "read_memory", "kind": "read", "args": ["address", "count"] },
+      { "name": "reboot_board", "kind": "action" },
+      { "name": "flash_firmware", "kind": "action", "args": ["path"] }
+    ]
+  }
+}
