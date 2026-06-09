@@ -181,6 +181,11 @@ fn tool_definitions() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "list_variables",
+            "description": "List the firmware's global variables (name, address, size), discovered from the ELF — so you can see what the project exposes and choose what to read.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "read_variable",
             "description": "Read a firmware global variable live by name: resolves its address from the ELF and reads it over SWD (works while the core runs or sleeps, no halt).",
             "inputSchema": {
@@ -237,6 +242,7 @@ fn dispatch_tool(
         }
         "get_trace" => run_action(cmd_tx, Action::ReadTrace),
         "get_snapshot" => run_action(cmd_tx, Action::GetSnapshot),
+        "list_variables" => run_action(cmd_tx, Action::ListVariables),
         "read_variable" => {
             let name = args
                 .get("name")

@@ -39,6 +39,8 @@ pub enum Action {
     ReadMemory { address: u64, count: usize },
     /// Decode a peripheral's live register state via the SVD.
     ReadPeripheral { name: String },
+    /// List the firmware's global variables (discovered from the ELF).
+    ListVariables,
     /// Read a global variable live by name (resolved from the ELF).
     ReadVariable { name: String },
     /// Read the context-switch timeline from the RAM ring buffer.
@@ -418,6 +420,17 @@ fn execute(
         Action::ReadPeripheral { name } => {
             let device = svd.ok_or("peripheral decode not configured (set AXYR_SVD)")?;
             peripheral::decode(device, &name, |addr| probe.read_word(addr))
+        }
+        Action::ListVariables => {
+            let globals = symbols::list_globals(elf)?;
+            if globals.is_empty() {
+                return Ok("No global variables found.".to_string());
+            }
+            let mut out = format!("{} global variables:\n", globals.len());
+            for g in &globals {
+                out.push_str(&format!("  {:<32} @{:#010x}  {} bytes\n", g.name, g.address, g.size));
+            }
+            Ok(out.trim_end().to_string())
         }
         Action::ReadVariable { name } => {
             // Resolve the global from the ELF, then read it live over SWD. A
