@@ -9,9 +9,29 @@
 
 use std::path::Path;
 
+use std::thread::sleep;
+use std::time::Duration;
+
 use probe_rs::flashing::{Format, download_file};
 use probe_rs::probe::list::Lister;
 use probe_rs::{MemoryInterface, Permissions, Session};
+
+/// Retry a probe operation a few times on transient SWD errors. Commodity
+/// ST-LINK clones occasionally throw a spurious "ARM specific error" under load;
+/// reads are idempotent, so retrying makes them deterministic.
+fn with_retry<T>(mut op: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut last = String::new();
+    for attempt in 0..4 {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                last = e;
+                sleep(Duration::from_millis(20 * (attempt + 1)));
+            }
+        }
+    }
+    Err(last)
+}
 
 /// The chip on the Nucleo-F401RE. Will become configurable as we add targets.
 pub const DEFAULT_CHIP: &str = "STM32F401RETx";
@@ -45,16 +65,22 @@ impl Probe {
 
     /// Read a 32-bit word from target memory. Works while the core runs.
     pub fn read_word(&mut self, address: u64) -> Result<u32, String> {
-        let mut core = self.session.core(0).map_err(|e| format!("core: {e}"))?;
-        core.read_word_32(address)
-            .map_err(|e| format!("read {address:#010x}: {e}"))
+        let session = &mut self.session;
+        with_retry(|| {
+            let mut core = session.core(0).map_err(|e| format!("core: {e}"))?;
+            core.read_word_32(address)
+                .map_err(|e| format!("read {address:#010x}: {e}"))
+        })
     }
 
     /// Read `out.len()` consecutive 32-bit words starting at `address`.
     pub fn read_words(&mut self, address: u64, out: &mut [u32]) -> Result<(), String> {
-        let mut core = self.session.core(0).map_err(|e| format!("core: {e}"))?;
-        core.read_32(address, out)
-            .map_err(|e| format!("read {} words @ {address:#010x}: {e}", out.len()))
+        let session = &mut self.session;
+        with_retry(|| {
+            let mut core = session.core(0).map_err(|e| format!("core: {e}"))?;
+            core.read_32(address, out)
+                .map_err(|e| format!("read {} words @ {address:#010x}: {e}", out.len()))
+        })
     }
 
     /// Read a Zephyr in-memory coredump straight from the target's RAM buffer.
@@ -91,12 +117,15 @@ impl Probe {
 
     /// Read a NUL-terminated string from target memory (up to `max` bytes).
     pub fn read_cstring(&mut self, address: u64, max: usize) -> Result<String, String> {
-        let mut core = self.session.core(0).map_err(|e| format!("core: {e}"))?;
-        let mut buf = vec![0u8; max];
-        core.read(address, &mut buf)
-            .map_err(|e| format!("read string @ {address:#010x}: {e}"))?;
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        Ok(String::from_utf8_lossy(&buf[..end]).to_string())
+        let session = &mut self.session;
+        with_retry(|| {
+            let mut core = session.core(0).map_err(|e| format!("core: {e}"))?;
+            let mut buf = vec![0u8; max];
+            core.read(address, &mut buf)
+                .map_err(|e| format!("read string @ {address:#010x}: {e}"))?;
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            Ok(String::from_utf8_lossy(&buf[..end]).to_string())
+        })
     }
 
     /// The core's current run/halt status (e.g. Running, Halted).
@@ -108,8 +137,11 @@ impl Probe {
 
     /// Reset the target and let it run.
     pub fn reset(&mut self) -> Result<(), String> {
-        let mut core = self.session.core(0).map_err(|e| format!("core: {e}"))?;
-        core.reset().map_err(|e| format!("reset: {e}"))
+        let session = &mut self.session;
+        with_retry(|| {
+            let mut core = session.core(0).map_err(|e| format!("core: {e}"))?;
+            core.reset().map_err(|e| format!("reset: {e}"))
+        })
     }
 
     /// Flash an ELF image onto the target's flash.
