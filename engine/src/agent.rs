@@ -25,7 +25,10 @@ use crate::recent_log::RecentLog;
 use crate::rtt::Telemetry;
 use crate::threads::ThreadTable;
 use crate::trace;
-use crate::{Crash, format_report, parse_crash_line, peripheral, reason_label, symbolize, symbols, system_map};
+use crate::{
+    Crash, format_report, health, parse_crash_line, peripheral, reason_label, symbolize, symbols,
+    system_map,
+};
 
 /// How many recent telemetry lines to keep as "what was happening just before".
 const RECENT_LOG_LINES: usize = 20;
@@ -49,6 +52,8 @@ pub enum Action {
     ReadTrace,
     /// Assemble the full system snapshot (the data contract) as JSON.
     GetSnapshot,
+    /// Run proactive health checks and report findings.
+    GetHealth,
 }
 
 /// A request to the agent: an action plus a channel to send the result back.
@@ -146,6 +151,9 @@ pub fn run(
             let result = match cmd.action {
                 Action::GetSnapshot => {
                     build_snapshot(&mut probe, &cfg, svd.as_ref(), &threads, last_crash.as_ref())
+                }
+                Action::GetHealth => {
+                    build_health(&mut probe, svd.as_ref(), &threads, last_crash.as_ref())
                 }
                 other => execute(&mut probe, other, svd.as_ref(), &cfg.elf),
             };
@@ -337,6 +345,37 @@ fn build_snapshot(
     serde_json::to_string_pretty(&snapshot).map_err(|e| format!("serialize snapshot: {e}"))
 }
 
+/// Run proactive health checks over the captured state.
+fn build_health(
+    probe: &mut Probe,
+    svd: Option<&svd_parser::svd::Device>,
+    threads: &Arc<Mutex<ThreadTable>>,
+    last_crash: Option<&Value>,
+) -> Result<String, String> {
+    let infos = threads.lock().map(|t| t.infos()).unwrap_or_default();
+    let reset = reset_reason(probe, svd);
+    let cause = last_crash
+        .and_then(|c| c.get("cause").and_then(|v| v.as_str()))
+        .map(String::from);
+    let findings = health::analyze(&infos, reset.as_deref(), cause.as_deref());
+    Ok(health::render(&findings))
+}
+
+/// The reset reason from RCC CSR (the set `*RSTF` flags), via the SVD.
+fn reset_reason(probe: &mut Probe, svd: Option<&svd_parser::svd::Device>) -> Option<String> {
+    let device = svd?;
+    let regs = peripheral::read_state(device, "RCC", |a| probe.read_word(a)).ok()?;
+    let csr = regs.iter().find(|r| r.name == "CSR")?;
+    let flags = csr
+        .fields
+        .iter()
+        .filter(|f| f.name.ends_with("RSTF"))
+        .map(|f| f.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    (!flags.is_empty()).then_some(flags)
+}
+
 /// Read the context-switch timeline as JSON `[{cycles, thread}]`, oldest first.
 fn read_timeline(probe: &mut Probe, elf: &str) -> Option<Value> {
     let head = symbols::resolve(elf, "axyr_trace_head").ok()?;
@@ -465,6 +504,7 @@ fn execute(
         // GetSnapshot is routed to build_snapshot by the owner loop (it needs
         // more context than execute carries); never reaches here.
         Action::GetSnapshot => Err("internal: snapshot handled elsewhere".to_string()),
+        Action::GetHealth => Err("internal: health handled elsewhere".to_string()),
         Action::ReadTrace => {
             let head = symbols::resolve(elf, "axyr_trace_head")?;
             let ring = symbols::resolve(elf, "axyr_trace")?;

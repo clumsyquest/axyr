@@ -188,6 +188,11 @@ fn tool_definitions() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "get_health",
+            "description": "Run proactive health checks and report anomalies (stack near overflow, runaway/starved thread, watchdog/brown-out reset, active crash) — insight, not raw data.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "get_snapshot",
             "description": "Return the whole system in one structured JSON snapshot (the data contract): device, state (reset reason/clocks), hardware map, threads, timeline, watched variables, decoded peripherals, and the last crash. Use this to understand and map the real system state.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -261,6 +266,7 @@ fn dispatch_tool(
         }
         "get_trace" => run_action(cmd_tx, Action::ReadTrace),
         "get_snapshot" => run_action(cmd_tx, Action::GetSnapshot),
+        "get_health" => run_action(cmd_tx, Action::GetHealth),
         "list_variables" => run_action(cmd_tx, Action::ListVariables),
         "list_peripherals" => run_action(cmd_tx, Action::ListPeripherals),
         "read_variable" => {
