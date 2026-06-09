@@ -188,6 +188,11 @@ fn tool_definitions() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "diff_snapshot",
+            "description": "Take a fresh snapshot and report what changed since the previous one (values, registers, state, threads) — 'what moved since it was working'.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "get_health",
             "description": "Run proactive health checks and report anomalies (stack near overflow, runaway/starved thread, watchdog/brown-out reset, active crash) — insight, not raw data.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -267,6 +272,7 @@ fn dispatch_tool(
         "get_trace" => run_action(cmd_tx, Action::ReadTrace),
         "get_snapshot" => run_action(cmd_tx, Action::GetSnapshot),
         "get_health" => run_action(cmd_tx, Action::GetHealth),
+        "diff_snapshot" => run_action(cmd_tx, Action::DiffSnapshot),
         "list_variables" => run_action(cmd_tx, Action::ListVariables),
         "list_peripherals" => run_action(cmd_tx, Action::ListPeripherals),
         "read_variable" => {
