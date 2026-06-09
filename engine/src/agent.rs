@@ -26,8 +26,8 @@ use crate::rtt::Telemetry;
 use crate::threads::ThreadTable;
 use crate::trace;
 use crate::{
-    Crash, format_report, health, parse_crash_line, peripheral, reason_label, symbolize, symbols,
-    system_map,
+    Crash, diff, format_report, health, parse_crash_line, peripheral, reason_label, symbolize,
+    symbols, system_map,
 };
 
 /// How many recent telemetry lines to keep as "what was happening just before".
@@ -54,6 +54,8 @@ pub enum Action {
     GetSnapshot,
     /// Run proactive health checks and report findings.
     GetHealth,
+    /// Diff a fresh snapshot against the previous one.
+    DiffSnapshot,
 }
 
 /// A request to the agent: an action plus a channel to send the result back.
@@ -113,6 +115,7 @@ pub fn run(
 
     let mut recent_log = RecentLog::new(RECENT_LOG_LINES);
     let mut last_crash: Option<Value> = None;
+    let mut last_snapshot: Option<Value> = None;
     let mut line = String::new();
     let mut buf = [0u8; 1024];
 
@@ -150,7 +153,28 @@ pub fn run(
         while let Ok(cmd) = commands.try_recv() {
             let result = match cmd.action {
                 Action::GetSnapshot => {
-                    build_snapshot(&mut probe, &cfg, svd.as_ref(), &threads, last_crash.as_ref())
+                    match build_snapshot(&mut probe, &cfg, svd.as_ref(), &threads, last_crash.as_ref()) {
+                        Ok(v) => {
+                            let text = serde_json::to_string_pretty(&v)
+                                .map_err(|e| format!("serialize snapshot: {e}"));
+                            last_snapshot = Some(v);
+                            text
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                Action::DiffSnapshot => {
+                    match build_snapshot(&mut probe, &cfg, svd.as_ref(), &threads, last_crash.as_ref()) {
+                        Ok(v) => {
+                            let text = match &last_snapshot {
+                                Some(prev) => diff::diff(prev, &v),
+                                None => "No previous snapshot; captured a baseline.".to_string(),
+                            };
+                            last_snapshot = Some(v);
+                            Ok(text)
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
                 Action::GetHealth => {
                     build_health(&mut probe, svd.as_ref(), &threads, last_crash.as_ref())
@@ -269,7 +293,7 @@ fn build_snapshot(
     svd: Option<&svd_parser::svd::Device>,
     threads: &Arc<Mutex<ThreadTable>>,
     last_crash: Option<&Value>,
-) -> Result<String, String> {
+) -> Result<Value, String> {
     let cpuid = probe.read_word(0xE000_ED00).ok().map(|v| format!("{v:#010x}"));
     let dts = cfg.dts_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok());
     let board = dts.as_deref().and_then(system_map::model);
@@ -342,7 +366,7 @@ fn build_snapshot(
         "crash": last_crash.cloned().unwrap_or(Value::Null),
         "actions": actions_json(),
     });
-    serde_json::to_string_pretty(&snapshot).map_err(|e| format!("serialize snapshot: {e}"))
+    Ok(snapshot)
 }
 
 /// Run proactive health checks over the captured state.
@@ -505,6 +529,7 @@ fn execute(
         // more context than execute carries); never reaches here.
         Action::GetSnapshot => Err("internal: snapshot handled elsewhere".to_string()),
         Action::GetHealth => Err("internal: health handled elsewhere".to_string()),
+        Action::DiffSnapshot => Err("internal: diff handled elsewhere".to_string()),
         Action::ReadTrace => {
             let head = symbols::resolve(elf, "axyr_trace_head")?;
             let ring = symbols::resolve(elf, "axyr_trace")?;
