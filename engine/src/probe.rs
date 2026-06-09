@@ -39,6 +39,7 @@ pub const DEFAULT_CHIP: &str = "STM32F401RETx";
 /// A live connection to the target over the first available debug probe.
 pub struct Probe {
     session: Session,
+    chip: String,
 }
 
 impl Probe {
@@ -55,7 +56,22 @@ impl Probe {
         let session = probe
             .attach(chip, Permissions::default())
             .map_err(|e| format!("attach to {chip}: {e}"))?;
-        Ok(Self { session })
+        Ok(Self { session, chip: chip.to_string() })
+    }
+
+    /// Re-open the probe and re-attach the session — recovers a wedged SWD link
+    /// without a human (the commodity ST-LINK occasionally needs this).
+    pub fn reattach(&mut self) -> Result<(), String> {
+        let info = Lister::new()
+            .list_all()
+            .into_iter()
+            .next()
+            .ok_or("no debug probe found")?;
+        let probe = info.open().map_err(|e| format!("open probe: {e}"))?;
+        self.session = probe
+            .attach(&self.chip, Permissions::default())
+            .map_err(|e| format!("re-attach to {}: {e}", self.chip))?;
+        Ok(())
     }
 
     /// Mutable access to the underlying session (e.g. for RTT telemetry).
