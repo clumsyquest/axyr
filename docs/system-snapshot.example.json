@@ -97,9 +97,9 @@
       ]
     },
     "variables": {
-      "status": "planned (deterministic watch via a low-priority on-device sampler over RTT)",
+      "status": "live (read by name over SWD — works while running OR sleeping, no halt)",
       "watch": [
-        { "name": "axyr_counter", "address": "0x20000220", "type": "uint32", "value": null }
+        { "name": "axyr_counter", "address": "0x200008a0", "type": "uint32", "value": 22 }
       ]
     }
   },
