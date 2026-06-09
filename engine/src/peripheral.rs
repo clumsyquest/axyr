@@ -10,7 +10,82 @@
 //! (`readAction`, e.g. a data register that pops a FIFO) or that are write-only
 //! are SKIPPED — reading must never disturb the running system.
 
+use serde_json::{Value, json};
 use svd_parser::svd::Device;
+
+/// A decoded field within a register.
+pub struct FieldState {
+    pub name: String,
+    pub value: u32,
+    pub meaning: Option<String>,
+}
+
+/// A decoded register: its raw value plus the set/meaningful fields.
+pub struct RegState {
+    pub name: String,
+    pub value: u32,
+    pub fields: Vec<FieldState>,
+}
+
+/// Read a peripheral's readable registers and decode their fields (structured).
+/// Side-effect / write-only registers are skipped (non-intrusive).
+pub fn read_state<R>(device: &Device, name: &str, mut read: R) -> Result<Vec<RegState>, String>
+where
+    R: FnMut(u64) -> Result<u32, String>,
+{
+    let periph = device
+        .peripherals
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| format!("peripheral not found in SVD: {name}"))?;
+    let base = periph.base_address;
+
+    let mut regs = Vec::new();
+    for reg in periph.all_registers() {
+        if reg.read_action.is_some() {
+            continue;
+        }
+        if let Some(access) = reg.properties.access
+            && !access.can_read()
+        {
+            continue;
+        }
+        let Ok(value) = read(base + reg.address_offset as u64) else { continue };
+
+        let mut fields = Vec::new();
+        for field in reg.fields() {
+            let width = field.bit_range.width;
+            let mask = if width >= 32 { u32::MAX } else { (1u32 << width) - 1 };
+            let fval = (value >> field.bit_range.offset) & mask;
+            let meaning = field
+                .enumerated_values
+                .iter()
+                .flat_map(|ev| ev.values.iter())
+                .find(|e| e.value == Some(fval as u64))
+                .map(|e| e.name.clone());
+            if fval != 0 || meaning.is_some() {
+                fields.push(FieldState { name: field.name.clone(), value: fval, meaning });
+            }
+        }
+        regs.push(RegState { name: reg.name.clone(), value, fields });
+    }
+    Ok(regs)
+}
+
+/// Structured peripheral state as JSON (for the snapshot contract).
+pub fn to_json(name: &str, base: u64, regs: &[RegState]) -> Value {
+    json!({
+        "name": name,
+        "address": format!("{base:#010x}"),
+        "registers": regs.iter().map(|r| json!({
+            "name": r.name,
+            "value": format!("{:#010x}", r.value),
+            "fields": r.fields.iter().map(|f| json!({
+                "name": f.name, "value": f.value, "meaning": f.meaning
+            })).collect::<Vec<_>>()
+        })).collect::<Vec<_>>()
+    })
+}
 
 /// Parse an SVD file into a `Device`. Call once and cache; `expand` resolves
 /// `derivedFrom` and register arrays so every peripheral has its registers.
@@ -22,56 +97,17 @@ pub fn load_svd(path: &str) -> Result<Device, String> {
 
 /// Decode a peripheral's live state. `read(addr)` reads a 32-bit word over the
 /// probe. Only side-effect-free, readable registers are touched.
-pub fn decode<R>(device: &Device, name: &str, mut read: R) -> Result<String, String>
+pub fn decode<R>(device: &Device, name: &str, read: R) -> Result<String, String>
 where
     R: FnMut(u64) -> Result<u32, String>,
 {
-    let periph = device
-        .peripherals
-        .iter()
-        .find(|p| p.name.eq_ignore_ascii_case(name))
-        .ok_or_else(|| format!("peripheral not found in SVD: {name}"))?;
-
-    let base = periph.base_address;
-    let mut out = format!("{} @{base:#010x}\n", periph.name);
-
-    for reg in periph.all_registers() {
-        // Non-intrusive: skip registers whose read has side effects, or that
-        // cannot be read at all.
-        if reg.read_action.is_some() {
-            continue;
-        }
-        if let Some(access) = reg.properties.access
-            && !access.can_read()
-        {
-            continue;
-        }
-
-        let addr = base + reg.address_offset as u64;
-        let Ok(value) = read(addr) else { continue };
-        out.push_str(&format!("  {:<10} = {value:#010x}\n", reg.name));
-
-        for field in reg.fields() {
-            let width = field.bit_range.width;
-            let mask = if width >= 32 { u32::MAX } else { (1u32 << width) - 1 };
-            let fval = (value >> field.bit_range.offset) & mask;
-
-            // Symbolic meaning from the SVD's enumerated values, if any.
-            let meaning = field
-                .enumerated_values
-                .iter()
-                .flat_map(|ev| ev.values.iter())
-                .find(|e| e.value == Some(fval as u64))
-                .map(|e| format!(" ({})", e.name));
-
-            // Keep it readable: show fields that are set or have a named meaning.
-            if fval != 0 || meaning.is_some() {
-                out.push_str(&format!(
-                    "      {:<12} = {fval}{}\n",
-                    field.name,
-                    meaning.unwrap_or_default()
-                ));
-            }
+    let regs = read_state(device, name, read)?;
+    let mut out = format!("{}\n", name.to_uppercase());
+    for r in &regs {
+        out.push_str(&format!("  {:<10} = {:#010x}\n", r.name, r.value));
+        for f in &r.fields {
+            let meaning = f.meaning.as_ref().map(|m| format!(" ({m})")).unwrap_or_default();
+            out.push_str(&format!("      {:<12} = {}{meaning}\n", f.name, f.value));
         }
     }
     Ok(out.trim_end().to_string())

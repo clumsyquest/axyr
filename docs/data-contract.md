@@ -13,11 +13,12 @@ Build the dashboard against the schema; the example shows a populated snapshot.
 ## Status
 
 `schema_version` is **1.0**. The snapshot shape is stable; changes are additive
-(new optional fields/sections). Today the engine exposes each section through an
-MCP tool returning human text (see `actions`); the canonical machine form is this
-JSON. A single `get_snapshot` tool returning the whole object is the intended
-one-call endpoint for the dashboard (next implementation step) — the shape it
-returns is exactly this contract.
+(new optional fields/sections). The engine implements the **`get_snapshot`** MCP
+tool, which returns this whole object as JSON in one call — the one-call endpoint
+for the dashboard. (Per-section tools that return human text also exist; see
+`actions`.) The `variables` section is populated from the `AXYR_WATCH`
+environment variable (comma-separated global names). Both the canonical example
+and the live `get_snapshot` output validate against the schema.
 
 ## Top-level
 
