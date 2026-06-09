@@ -27,6 +27,27 @@ pub struct RegState {
     pub fields: Vec<FieldState>,
 }
 
+/// List the chip's peripherals (name, base address, description) from the SVD,
+/// so an agent can DISCOVER what it may pass to `read_peripheral`.
+pub fn list(device: &Device) -> Vec<(String, u64, Option<String>)> {
+    let mut list: Vec<(String, u64, Option<String>)> = device
+        .peripherals
+        .iter()
+        .map(|p| {
+            let desc = p
+                .description
+                .as_deref()
+                .and_then(|d| d.lines().next())
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty());
+            (p.name.clone(), p.base_address, desc)
+        })
+        .collect();
+    list.sort_by(|a, b| a.0.cmp(&b.0));
+    list.dedup_by(|a, b| a.0 == b.0);
+    list
+}
+
 /// Read a peripheral's readable registers and decode their fields (structured).
 /// Side-effect / write-only registers are skipped (non-intrusive).
 pub fn read_state<R>(device: &Device, name: &str, mut read: R) -> Result<Vec<RegState>, String>

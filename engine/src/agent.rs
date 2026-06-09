@@ -37,6 +37,8 @@ pub enum Action {
     Reboot,
     Flash(PathBuf),
     ReadMemory { address: u64, count: usize },
+    /// List the chip's peripherals (discovered from the SVD).
+    ListPeripherals,
     /// Decode a peripheral's live register state via the SVD.
     ReadPeripheral { name: String },
     /// List the firmware's global variables (discovered from the ELF).
@@ -414,6 +416,16 @@ fn execute(
             let mut out = String::new();
             for (i, w) in words.iter().enumerate() {
                 out.push_str(&format!("{:#010x}: {w:#010x}\n", address + (i as u64) * 4));
+            }
+            Ok(out.trim_end().to_string())
+        }
+        Action::ListPeripherals => {
+            let device = svd.ok_or("peripheral list not configured (set AXYR_SVD)")?;
+            let list = peripheral::list(device);
+            let mut out = format!("{} peripherals:\n", list.len());
+            for (name, base, desc) in &list {
+                let d = desc.as_deref().map(|s| format!("  — {s}")).unwrap_or_default();
+                out.push_str(&format!("  {:<14} @{base:#010x}{d}\n", name));
             }
             Ok(out.trim_end().to_string())
         }
