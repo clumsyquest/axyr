@@ -70,17 +70,24 @@ pub fn run(mut probe: Probe, cfg: Config, commands: Receiver<Command>) {
     let mut buf = [0u8; 1024];
 
     loop {
-        // 1. Drain telemetry (the default, real-time activity).
-        if let Ok(n) = telemetry.read(probe.session_mut(), &mut buf) {
-            for &b in &buf[..n] {
-                match b {
-                    b'\n' => {
-                        handle_line(line.trim(), &cfg, &mut collector, &mut recent_log, &mut last_backtrace);
-                        line.clear();
+        // 1. Drain telemetry fully this cycle (keep reading until the buffer is
+        //    empty) so a burst — e.g. a coredump — is pulled at probe speed
+        //    instead of one chunk per sleep.
+        loop {
+            match telemetry.read(probe.session_mut(), &mut buf) {
+                Ok(n) if n > 0 => {
+                    for &b in &buf[..n] {
+                        match b {
+                            b'\n' => {
+                                handle_line(line.trim(), &cfg, &mut collector, &mut recent_log, &mut last_backtrace);
+                                line.clear();
+                            }
+                            b'\r' => {}
+                            _ => line.push(b as char),
+                        }
                     }
-                    b'\r' => {}
-                    _ => line.push(b as char),
                 }
+                _ => break,
             }
         }
 
@@ -91,7 +98,7 @@ pub fn run(mut probe: Probe, cfg: Config, commands: Receiver<Command>) {
             let _ = cmd.reply.send(result);
         }
 
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
