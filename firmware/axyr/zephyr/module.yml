@@ -1,0 +1,4 @@
+name: axyr
+build:
+  cmake: .
+  kconfig: Kconfig
