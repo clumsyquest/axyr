@@ -24,11 +24,14 @@ system to AI agents over MCP — including board actions.
   firmware ELF symbol table (generic: any ELF, any variable).
 - `src/threads.rs` — parses Zephyr thread-analyzer telemetry into per-thread
   stack usage and CPU load (live RTOS state).
+- `src/peripheral.rs` — decodes a peripheral's live registers into plain language
+  via the chip's SVD (skips side-effect/write-only registers — non-intrusive).
+  Covers clocks, reset reason (RCC CSR), enabled peripherals, GPIO, NVIC, etc.
 - `src/agent.rs` — the probe-owner loop: one thread owns the probe, drains RTT
   telemetry (feeding the crash pipeline), and runs queued actions between drains.
 - `src/main.rs` — wires it together: spawns the agent thread and serves MCP over
-  stdio (`get_last_crash`, `get_system_map`, `get_threads`, `reboot_board`,
-  `flash_firmware`, `read_memory`). Reads are served directly; actions are routed to the agent
+  stdio (`get_last_crash`, `get_system_map`, `get_threads`, `read_peripheral`,
+  `reboot_board`, `flash_firmware`, `read_memory`). Reads are served directly; actions are routed to the agent
   thread so they never disturb the real-time telemetry.
 - `src/bin/rtt_read.rs` — streams the firmware's RTT output (`rtt_read [chip]`).
 - `src/bin/probe_check.rs` — hardware smoke test for the probe (attach / read /
@@ -60,6 +63,7 @@ Example:
 ```bash
 export AXYR_CHIP=STM32F401RETx            # target chip (default)
 export AXYR_DTS=~/zephyrproject/zephyr/build/zephyr/zephyr.dts   # for get_system_map
+export AXYR_SVD=~/STMicroelectronics/.../SVD/STM32F401.svd       # for read_peripheral
 # coredump tooling, to resolve the full call stack:
 export AXYR_GDB=~/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb
 export AXYR_COREDUMP_LOG_PARSER=~/zephyrproject/zephyr/scripts/coredump/coredump_serial_log_parser.py

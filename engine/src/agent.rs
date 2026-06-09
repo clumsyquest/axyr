@@ -18,6 +18,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::coredump::{CoredumpTools, resolve_backtrace_from_bin};
+use crate::peripheral;
 use crate::probe::Probe;
 use crate::recent_log::RecentLog;
 use crate::rtt::Telemetry;
@@ -34,6 +35,8 @@ pub enum Action {
     Reboot,
     Flash(PathBuf),
     ReadMemory { address: u64, count: usize },
+    /// Decode a peripheral's live register state via the SVD.
+    ReadPeripheral { name: String },
 }
 
 /// A request to the agent: an action plus a channel to send the result back.
@@ -48,6 +51,8 @@ pub struct Config {
     pub addr2line: String,
     pub crash_file: String,
     pub coredump: Option<CoredumpTools>,
+    /// Path to the chip's SVD, for decoding peripheral registers.
+    pub svd_path: Option<String>,
 }
 
 /// Run the probe-owner loop forever: drain RTT, capture crashes, run commands.
@@ -63,6 +68,13 @@ pub fn run(
         .map(|s| s.address)
         .map_err(|e| eprintln!("agent: no coredump buffer symbol ({e}); call stack disabled"))
         .ok();
+
+    // The chip's SVD, for decoding peripheral registers (loaded once).
+    let svd = cfg.svd_path.as_ref().and_then(|p| {
+        peripheral::load_svd(p)
+            .map_err(|e| eprintln!("agent: {e}; peripheral decode disabled"))
+            .ok()
+    });
 
     // The RTT scan needs an awake window; retry until the control block is found.
     let mut telemetry = loop {
@@ -112,7 +124,7 @@ pub fn run(
         // 3. Run any queued actions, interleaved between drains. RTT keeps
         //    buffering on the target while we do, so nothing is lost.
         while let Ok(cmd) = commands.try_recv() {
-            let result = execute(&mut probe, cmd.action);
+            let result = execute(&mut probe, cmd.action, svd.as_ref());
             let _ = cmd.reply.send(result);
         }
 
@@ -173,7 +185,11 @@ fn report_crash(
 }
 
 /// Execute one action on the owned probe.
-fn execute(probe: &mut Probe, action: Action) -> Result<String, String> {
+fn execute(
+    probe: &mut Probe,
+    action: Action,
+    svd: Option<&svd_parser::svd::Device>,
+) -> Result<String, String> {
     match action {
         Action::Reboot => {
             probe.reset()?;
@@ -191,6 +207,10 @@ fn execute(probe: &mut Probe, action: Action) -> Result<String, String> {
                 out.push_str(&format!("{:#010x}: {w:#010x}\n", address + (i as u64) * 4));
             }
             Ok(out.trim_end().to_string())
+        }
+        Action::ReadPeripheral { name } => {
+            let device = svd.ok_or("peripheral decode not configured (set AXYR_SVD)")?;
+            peripheral::decode(device, &name, |addr| probe.read_word(addr))
         }
     }
 }
