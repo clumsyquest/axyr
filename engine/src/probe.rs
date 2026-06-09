@@ -89,6 +89,16 @@ impl Probe {
         Ok(Some(data))
     }
 
+    /// Read a NUL-terminated string from target memory (up to `max` bytes).
+    pub fn read_cstring(&mut self, address: u64, max: usize) -> Result<String, String> {
+        let mut core = self.session.core(0).map_err(|e| format!("core: {e}"))?;
+        let mut buf = vec![0u8; max];
+        core.read(address, &mut buf)
+            .map_err(|e| format!("read string @ {address:#010x}: {e}"))?;
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        Ok(String::from_utf8_lossy(&buf[..end]).to_string())
+    }
+
     /// The core's current run/halt status (e.g. Running, Halted).
     pub fn status(&mut self) -> Result<String, String> {
         let mut core = self.session.core(0).map_err(|e| format!("core: {e}"))?;

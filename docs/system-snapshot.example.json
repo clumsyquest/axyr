@@ -101,6 +101,15 @@
       "watch": [
         { "name": "axyr_counter", "address": "0x200008a0", "type": "uint32", "value": 22 }
       ]
+    },
+    "timeline": {
+      "status": "live (context-switch ring buffer in RAM, read over SWD — 'what ran when')",
+      "recent_switches": [
+        { "cycles_since_first": 0, "thread": "main" },
+        { "cycles_since_first": 3984, "thread": "idle" },
+        { "cycles_since_first": 21008400, "thread": "main" },
+        { "cycles_since_first": 21012384, "thread": "idle" }
+      ]
     }
   },
 

@@ -154,6 +154,11 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "get_trace",
+            "description": "Return the context-switch timeline ('what ran when'): recent thread switches with cycle timestamps, read from a RAM ring buffer.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "read_variable",
             "description": "Read a firmware global variable live by name: resolves its address from the ELF and reads it over SWD (works while the core runs or sleeps, no halt).",
             "inputSchema": {
@@ -208,6 +213,7 @@ fn dispatch_tool(
             let src = fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
             system_map::render(&src).ok_or_else(|| "could not parse devicetree".to_string())
         }
+        "get_trace" => run_action(cmd_tx, Action::ReadTrace),
         "read_variable" => {
             let name = args
                 .get("name")
