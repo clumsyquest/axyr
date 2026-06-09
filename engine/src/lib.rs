@@ -1,5 +1,6 @@
 use std::process::Command;
 
+pub mod agent;
 pub mod coredump;
 pub mod probe;
 pub mod recent_log;
