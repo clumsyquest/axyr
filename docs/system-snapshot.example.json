@@ -16,7 +16,9 @@
   "state": {
     "status": "live",
     "core": "crashed",
-    "summary": "Bus fault: invalid memory access (precise)"
+    "summary": "Bus fault: invalid memory access (precise)",
+    "reset_reason": "software reset (RCC CSR: SFTRSTF) | also seen: PORRSTF, PADRSTF, BORRSTF",
+    "clocks": "PLL on/locked, HSE on, SYSCLK from PLL (RCC CR/CFGR/PLLCFGR)"
   },
 
   "system_map": {
@@ -71,6 +73,19 @@
         { "name": "SCB CPUID", "address": "0xE000ED00", "value": "0x410fc241" },
         { "name": "SCB ICSR", "address": "0xE000ED04", "value": "0x0400f805" }
       ]
+    },
+    "peripherals": {
+      "status": "live (decoded via SVD, non-intrusive — read-side-effect registers skipped)",
+      "example": {
+        "name": "RCC", "address": "0x40023800",
+        "decoded": {
+          "CR": "PLLRDY=1 PLLON=1 HSEON=1 HSERDY=1 HSION=1",
+          "AHB1ENR": "GPIOA..H enabled, DMA1 enabled",
+          "APB1ENR": "USART2 enabled, PWR enabled",
+          "CSR": "reset flags: SFTRSTF/PORRSTF/PADRSTF/BORRSTF"
+        }
+      },
+      "tool": "read_peripheral { name }  — e.g. GPIOA, USART2, RCC, NVIC"
     },
     "threads": {
       "status": "live (Zephyr thread analyzer over RTT)",

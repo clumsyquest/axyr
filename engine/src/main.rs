@@ -46,7 +46,8 @@ fn main() {
         std::process::exit(1);
     });
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
-    let cfg = Config { elf, addr2line, crash_file: crash_file.clone(), coredump };
+    let svd_path = env::var("AXYR_SVD").ok();
+    let cfg = Config { elf, addr2line, crash_file: crash_file.clone(), coredump, svd_path };
     // Shared live thread state: the agent updates it, the MCP front-end reads it.
     let threads = Arc::new(Mutex::new(ThreadTable::new()));
     let threads_agent = threads.clone();
@@ -153,6 +154,15 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "read_peripheral",
+            "description": "Decode a peripheral's live register state in plain language (e.g. GPIOA, USART2, RCC) using the chip's SVD: each readable register and its bit-fields with their meaning.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "Peripheral name, e.g. \"GPIOA\" or \"USART2\"." } },
+                "required": ["name"]
+            }
+        },
+        {
             "name": "read_memory",
             "description": "Read 32-bit words from the target's memory over SWD. Useful to inspect registers or peripherals.",
             "inputSchema": {
@@ -188,6 +198,13 @@ fn dispatch_tool(
             let path = dts.ok_or("system map not configured (set AXYR_DTS)")?;
             let src = fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
             system_map::render(&src).ok_or_else(|| "could not parse devicetree".to_string())
+        }
+        "read_peripheral" => {
+            let name = args
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("missing required argument: name")?;
+            run_action(cmd_tx, Action::ReadPeripheral { name: name.to_string() })
         }
         "reboot_board" => run_action(cmd_tx, Action::Reboot),
         "flash_firmware" => {

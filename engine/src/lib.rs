@@ -2,6 +2,7 @@ use std::process::Command;
 
 pub mod agent;
 pub mod coredump;
+pub mod peripheral;
 pub mod probe;
 pub mod recent_log;
 pub mod rtt;
