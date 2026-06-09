@@ -18,15 +18,27 @@ exposes it to AI agents over MCP.
   system state and for agent actions (flash/reboot/debug).
 - `src/system_map.rs` — parses the Zephyr devicetree (`zephyr.dts`) into the
   board's hardware map: peripherals, sensors/actuators, addresses, on/off state.
+- `src/symbols.rs` — resolves a global variable to its address/size from the
+  firmware ELF symbol table (generic: any ELF, any variable).
 - `src/bin/probe_check.rs` — hardware smoke test for the probe foundation:
   `probe_check [chip] [elf-to-flash]` (defaults to the Nucleo-F401RE).
 - `src/main.rs` — the serial listener that wires it together and writes the
   "last crash" file.
 - `src/bin/mcp.rs` — an MCP server (stdio) exposing the system to an AI agent:
   `get_last_crash` and `get_system_map` (reads), plus `reboot_board`,
-  `flash_firmware`, and `read_memory` which drive the board over the debug probe.
-  Probe actions attach per-call; set `AXYR_CHIP` for another chip and `AXYR_DTS`
-  to the `zephyr.dts` path for `get_system_map`.
+  `flash_firmware`, `read_memory`, and `read_variable` (resolve a global from the
+  ELF and read it live). Probe actions attach per-call; set `AXYR_CHIP` for
+  another chip, `AXYR_DTS` for `get_system_map`, and `AXYR_ELF` for
+  `read_variable`.
+
+### Reading live state (the overhead caveat)
+
+On the Nucleo's ST-LINK, SRAM is only debugger-visible while the core is
+**halted** — a running/sleeping core returns zeros for AHB memory (the CPU's own
+registers, e.g. CPUID, stay readable). So `read_variable` takes a snapshot with a
+brief **halt → read → resume** (sub-millisecond). Truly zero-overhead background
+reads need a different probe (J-Link) or an RTT channel. This is the real
+"capture without overhead" challenge.
 
 ## Build & test
 

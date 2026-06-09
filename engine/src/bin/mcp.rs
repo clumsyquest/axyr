@@ -20,7 +20,7 @@ use std::io::{self, BufRead, Write};
 use serde_json::{Value, json};
 
 use axyr_engine::probe::{DEFAULT_CHIP, Probe};
-use axyr_engine::system_map;
+use axyr_engine::{symbols, system_map};
 
 fn main() {
     // The crash file that the serial listener keeps up to date.
@@ -32,6 +32,8 @@ fn main() {
     let chip = env::var("AXYR_CHIP").unwrap_or_else(|_| DEFAULT_CHIP.to_string());
     // Path to the Zephyr devicetree (build/zephyr/zephyr.dts) for the system map.
     let dts = env::var("AXYR_DTS").ok();
+    // Path to the firmware ELF, for resolving variables to read live.
+    let elf = env::var("AXYR_ELF").ok();
 
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -73,7 +75,8 @@ fn main() {
             "tools/call" => {
                 let tool = req.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
                 let args = req.pointer("/params/arguments").cloned().unwrap_or(json!({}));
-                let result = dispatch_tool(tool, &args, &crash_file, &chip, dts.as_deref());
+                let result =
+                    dispatch_tool(tool, &args, &crash_file, &chip, dts.as_deref(), elf.as_deref());
                 Some(match result {
                     Ok(text) => json!({
                         "jsonrpc": "2.0", "id": id,
@@ -137,6 +140,17 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["address"]
             }
+        },
+        {
+            "name": "read_variable",
+            "description": "Read a firmware global variable live by name: resolves its address from the ELF symbol table, then reads it over SWD while the core runs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The global variable's symbol name, e.g. \"axyr_counter\"." }
+                },
+                "required": ["name"]
+            }
         }
     ])
 }
@@ -149,6 +163,7 @@ fn dispatch_tool(
     crash_file: &str,
     chip: &str,
     dts: Option<&str>,
+    elf: Option<&str>,
 ) -> Result<String, String> {
     match tool {
         "get_last_crash" => Ok(fs::read_to_string(crash_file)
@@ -192,6 +207,33 @@ fn dispatch_tool(
                 out.push_str(&format!("{a:#010x}: {w:#010x}\n"));
             }
             Ok(out.trim_end().to_string())
+        }
+        "read_variable" => {
+            let elf = elf.ok_or("variable read not configured (set AXYR_ELF)")?;
+            let name = args
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("missing required argument: name")?;
+            let sym = symbols::resolve(elf, name)?;
+            // Read enough 32-bit words to cover the variable (min 1, capped).
+            let words_needed = (sym.size.max(1) as usize).div_ceil(4).clamp(1, 64);
+            let mut probe = Probe::attach(chip)?;
+            let mut words = vec![0u32; words_needed];
+            // Snapshot read: SRAM is only debugger-visible while halted, so this
+            // briefly halts, samples, and resumes.
+            probe.read_words_snapshot(sym.address, &mut words)?;
+            let mut out = format!(
+                "{} @{:#010x} ({} bytes) =",
+                sym.name, sym.address, sym.size
+            );
+            if sym.size <= 4 {
+                out.push_str(&format!(" {:#010x} ({})", words[0], words[0]));
+            } else {
+                for w in &words {
+                    out.push_str(&format!(" {w:#010x}"));
+                }
+            }
+            Ok(out)
         }
         other => Err(format!("Unknown tool: {other}")),
     }
