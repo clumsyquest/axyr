@@ -1,58 +1,63 @@
 # crash_demo
 
-A minimal Zephyr application that deliberately triggers a CPU fault and then
-**intercepts it with a custom fatal error handler**. It is the on-device
-foundation for Axyr's crash reporting: capture the CPU state at the exact moment
-of a crash.
+A minimal Zephyr application that deliberately triggers a CPU fault and exposes
+the full crash state to the host. It is the on-device foundation for Axyr's
+crash reporting: capture what the hardware was really doing at the moment it
+died.
 
 ## What it does
 
-1. `main()` reads from `0xBADCAFE0`, an address not mapped on the STM32F401.
-   The Cortex-M4 raises a precise BusFault.
-2. Instead of leaving the crash to Zephyr alone, the app overrides
-   `k_sys_fatal_error_handler` (a *weak* kernel symbol). Zephyr calls our version
-   and passes it the fault `reason` plus the exception stack frame (`esf`) — a
-   snapshot of the CPU registers at the moment of the fault.
-3. Our handler prints that captured state, then halts the CPU.
+1. A nested call chain `main() → read_sensor() → i2c_read_reg()` dereferences
+   `0xBADCAFE0`, an address not mapped on the STM32F401. The Cortex-M4 raises a
+   precise BusFault. The chain is deliberate: it makes the captured **call
+   stack** show a real path to the fault, not just the crashing line.
+2. The app overrides `k_sys_fatal_error_handler` (a *weak* kernel symbol).
+   Zephyr calls our version with the fault `reason` and the exception stack
+   frame (`esf`), and we emit a single structured line the host can parse:
+   `AXYR_CRASH v=1 reason=… pc=… lr=… …`.
+3. With `CONFIG_DEBUG_COREDUMP=y` (see `prj.conf`), Zephyr *also* dumps a full
+   CPU + stack snapshot over serial as a `#CD:BEGIN# … #CD:END#` block. That is
+   what the host unwinds offline into the complete call stack.
 
 ## Build & flash
 
 See `../../docs/flashing-nucleo-f401re-on-linux.md` for the toolchain setup.
 
-````bash
+```bash
 cd ~/zephyrproject/zephyr
 west build -p always -b nucleo_f401re ~/axyr/firmware/crash_demo
 st-info --probe --connect-under-reset
 west flash
-screen /dev/ttyACM0 115200
-````
+```
 
 ## Expected output
 
-Zephyr prints its own fault dump first (`BUS FAULT`, registers, `BFAR`), then our
-handler prints its captured block:
+Zephyr prints its own fault dump first (`BUS FAULT`, registers, `BFAR`), then
+the coredump block, then our structured line:
 
-````
->>> AXYR caught a crash! (reason=25)
-    pc   = 0x08000508
-    lr   = 0x08000505
-    xpsr = 0x61000000
-    r0   = 0x0800399f
-    ...
->>> halting
-````
+```
+[00:00:00.000,000] <err> os: ***** BUS FAULT *****
+[00:00:00.000,000] <err> os:   Precise data bus error
+[00:00:00.000,000] <err> os:   BFAR Address: 0xbadcafe0
+...
+[00:00:00.028,000] <err> coredump: #CD:BEGIN#
+[00:00:00.033,000] <err> coredump: #CD:5a4502...
+[00:00:00.151,000] <err> coredump: #CD:END#
+AXYR_CRASH v=1 reason=25 pc=0x0800046a lr=0x080004b5 ...
+```
 
-- `reason` — fault type, already decoded by Zephyr (`25` = precise data bus error)
-- `pc` — the faulting instruction; later resolved to the exact source line (addr2line)
-- `r0`–`r3`, `lr`, `xpsr` — CPU register snapshot at the crash
+- `reason` — fault type, decoded by Zephyr (`25` = precise data bus error)
+- `pc` — the faulting instruction; the host resolves it to a source line
+- `#CD:` block — the coredump the host turns into the full call stack
 
-## Note: fault status registers are ephemeral
+## Note: the coredump captures what the handler cannot
 
 The Cortex-M fault status registers (`CFSR`, `BFAR`, `HFSR`) are **not** usable
-from our handler. Zephyr's arch layer reads them to build its own dump, then
-clears them **before** calling `k_sys_fatal_error_handler`. By the time our
-handler runs they are already zeroed. The reliable data is what Zephyr hands us:
-`reason` and `esf`. Capturing the raw `BFAR` would require hooking earlier in the
-fault path (future work).
-````
-````
+from `k_sys_fatal_error_handler`: Zephyr's arch layer reads them to build its own
+dump, then clears them **before** calling our handler. By the time it runs they
+are already zeroed.
+
+This is exactly why the coredump matters. Zephyr captures the snapshot — fault
+address, registers, and stack — at the instant of the fault, before that state
+evaporates. The host replays it offline with GDB (no board required) to recover
+the precise faulting address and the full backtrace. See `../../engine/README.md`.

@@ -1,5 +1,7 @@
 use std::process::Command;
 
+pub mod coredump;
+
 /// A crash captured from the device.
 pub struct Crash {
     pub reason: Option<u32>,
