@@ -1,8 +1,25 @@
+//! MCP server exposing Axyr to an AI agent over stdio (one JSON-RPC message per
+//! line).
+//!
+//! Read tools:
+//!   - get_last_crash : the most recent crash post-mortem.
+//!
+//! Action tools (drive the board over the debug probe):
+//!   - reboot_board   : reset the target and let it run.
+//!   - flash_firmware : flash an ELF onto the target.
+//!   - read_memory    : read 32-bit words from target memory (live).
+//!
+//! Each action attaches the probe for the call and releases it on return, so it
+//! never holds the SWD lock between calls (the serial listener uses a different
+//! USB interface and keeps running in parallel).
+
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+
+use axyr_engine::probe::{DEFAULT_CHIP, Probe};
 
 fn main() {
     // The crash file that the serial listener keeps up to date.
@@ -10,6 +27,8 @@ fn main() {
         eprintln!("usage: mcp <crash-file>");
         std::process::exit(1);
     });
+    // The target chip for probe actions (overridable for other boards).
+    let chip = env::var("AXYR_CHIP").unwrap_or_else(|_| DEFAULT_CHIP.to_string());
 
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -46,24 +65,22 @@ fn main() {
             }
             "tools/list" => Some(json!({
                 "jsonrpc": "2.0", "id": id,
-                "result": { "tools": [{
-                    "name": "get_last_crash",
-                    "description": "Return the most recent crash captured from the board (fault type and source location).",
-                    "inputSchema": { "type": "object", "properties": {} }
-                }]}
+                "result": { "tools": tool_definitions() }
             })),
             "tools/call" => {
                 let tool = req.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
-                let text = if tool == "get_last_crash" {
-                    fs::read_to_string(&crash_file)
-                        .unwrap_or_else(|_| "No crash recorded yet.".to_string())
-                } else {
-                    format!("Unknown tool: {tool}")
-                };
-                Some(json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": { "content": [{ "type": "text", "text": text }] }
-                }))
+                let args = req.pointer("/params/arguments").cloned().unwrap_or(json!({}));
+                let result = dispatch_tool(tool, &args, &crash_file, &chip);
+                Some(match result {
+                    Ok(text) => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": { "content": [{ "type": "text", "text": text }] }
+                    }),
+                    Err(text) => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": { "content": [{ "type": "text", "text": text }], "isError": true }
+                    }),
+                })
             }
             // notifications/initialized and anything else: no reply.
             _ => None,
@@ -75,4 +92,99 @@ fn main() {
             out.flush().expect("flush failed");
         }
     }
+}
+
+/// The tool catalogue advertised to the agent.
+fn tool_definitions() -> Value {
+    json!([
+        {
+            "name": "get_last_crash",
+            "description": "Return the most recent crash captured from the board (cause, source location, call stack, and recent serial output).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "reboot_board",
+            "description": "Reset the target board over the debug probe and let it run.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "flash_firmware",
+            "description": "Flash an ELF image onto the target board's flash, then leave it running.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to the ELF file to flash." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "read_memory",
+            "description": "Read 32-bit words from the target's memory over SWD (works while the core runs). Useful to inspect registers, peripherals, or variables.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "address": { "type": "string", "description": "Start address, e.g. \"0xE000ED00\" or decimal." },
+                    "count": { "type": "integer", "description": "Number of 32-bit words to read (default 1, max 256)." }
+                },
+                "required": ["address"]
+            }
+        }
+    ])
+}
+
+/// Route a tool call to its handler. Returns Ok(text) or Err(text); the caller
+/// maps Err to an MCP error result so the agent sees the failure as data.
+fn dispatch_tool(tool: &str, args: &Value, crash_file: &str, chip: &str) -> Result<String, String> {
+    match tool {
+        "get_last_crash" => Ok(fs::read_to_string(crash_file)
+            .unwrap_or_else(|_| "No crash recorded yet.".to_string())),
+        "reboot_board" => {
+            let mut probe = Probe::attach(chip)?;
+            probe.reset()?;
+            Ok("Board reset and running.".to_string())
+        }
+        "flash_firmware" => {
+            let path = args
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("missing required argument: path")?;
+            let mut probe = Probe::attach(chip)?;
+            probe.flash_elf(std::path::Path::new(path))?;
+            Ok(format!("Flashed {path} to {chip}; board running."))
+        }
+        "read_memory" => {
+            let addr_str = args
+                .get("address")
+                .and_then(Value::as_str)
+                .ok_or("missing required argument: address")?;
+            let address = parse_address(addr_str)?;
+            let count = args
+                .get("count")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                .clamp(1, 256) as usize;
+            let mut probe = Probe::attach(chip)?;
+            let mut words = vec![0u32; count];
+            probe.read_words(address, &mut words)?;
+            let mut out = String::new();
+            for (i, w) in words.iter().enumerate() {
+                let a = address + (i as u64) * 4;
+                out.push_str(&format!("{a:#010x}: {w:#010x}\n"));
+            }
+            Ok(out.trim_end().to_string())
+        }
+        other => Err(format!("Unknown tool: {other}")),
+    }
+}
+
+/// Parse a memory address given as hex ("0x...") or decimal.
+fn parse_address(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16)
+    } else {
+        s.parse::<u64>()
+    };
+    parsed.map_err(|_| format!("invalid address: {s:?}"))
 }

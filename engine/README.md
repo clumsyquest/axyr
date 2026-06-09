@@ -20,8 +20,10 @@ exposes it to AI agents over MCP.
   `probe_check [chip] [elf-to-flash]` (defaults to the Nucleo-F401RE).
 - `src/main.rs` — the serial listener that wires it together and writes the
   "last crash" file.
-- `src/bin/mcp.rs` — a small MCP server exposing `get_last_crash`, which simply
-  returns the contents of that file.
+- `src/bin/mcp.rs` — an MCP server (stdio) exposing the post-mortem and board
+  actions to an AI agent: `get_last_crash` (read), plus `reboot_board`,
+  `flash_firmware`, and `read_memory` which drive the board over the debug probe.
+  Each action attaches the probe per-call; set `AXYR_CHIP` to target another board.
 
 ## Build & test
 
