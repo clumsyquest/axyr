@@ -1,0 +1,46 @@
+config AXYR
+	bool "Axyr on-device support"
+	help
+	  One switch to expose this firmware to Axyr: telemetry + crash coredump
+	  over RTT, thread analysis, and a context-switch trace ring — all the
+	  on-device support Axyr needs, with no hand-edited prj.conf.
+
+# Plain (non-choice) options.
+configdefault USE_SEGGER_RTT
+	default y if AXYR
+configdefault CONSOLE
+	default y if AXYR
+configdefault RTT_CONSOLE
+	default y if AXYR
+configdefault DEBUG_COREDUMP
+	default y if AXYR
+configdefault THREAD_ANALYZER
+	default y if AXYR
+configdefault THREAD_ANALYZER_AUTO
+	default y if AXYR
+configdefault THREAD_NAME
+	default y if AXYR
+configdefault THREAD_RUNTIME_STATS
+	default y if AXYR
+configdefault THREAD_STACK_INFO
+	default y if AXYR
+configdefault INIT_STACKS
+	default y if AXYR
+configdefault TRACING
+	default y if AXYR
+configdefault LOG
+	default y if AXYR
+
+# Choice members: re-open the named choice to set its default when AXYR is on.
+choice DEBUG_COREDUMP_BACKEND
+	default DEBUG_COREDUMP_BACKEND_IN_MEMORY if AXYR
+endchoice
+choice DEBUG_COREDUMP_MEMORY_DUMP
+	default DEBUG_COREDUMP_MEMORY_DUMP_MIN if AXYR
+endchoice
+choice TRACING_FORMAT_CHOICE
+	default TRACING_USER if AXYR
+endchoice
+choice LOG_MODE
+	default LOG_MODE_IMMEDIATE if AXYR
+endchoice
