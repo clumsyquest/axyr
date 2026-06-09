@@ -147,10 +147,25 @@ pub fn resolve_backtrace(tools: &CoredumpTools, block: &str) -> Result<String, S
         ));
     }
 
-    // 2. Drive GDB offline; the parser acts as the remote target over a pipe.
+    // 2. Drive GDB offline on the parsed binary coredump.
+    run_gdb_on(tools, &bin_path)
+}
+
+/// Resolve a backtrace directly from a raw binary coredump (e.g. read from the
+/// target's IN_MEMORY backend over SWD), skipping the serial-log hex parser.
+pub fn resolve_backtrace_from_bin(tools: &CoredumpTools, coredump: &[u8]) -> Result<String, String> {
+    let bin_path =
+        std::env::temp_dir().join(format!("axyr-coredump-{}.bin", std::process::id()));
+    fs::write(&bin_path, coredump).map_err(|e| format!("write coredump bin: {e}"))?;
+    run_gdb_on(tools, &bin_path)
+}
+
+/// Drive GDB offline over a pipe: the gdbserver script serves the binary
+/// coredump as a remote target; keep the `bt` frames.
+fn run_gdb_on(tools: &CoredumpTools, bin_path: &std::path::Path) -> Result<String, String> {
     let remote = format!(
         "target remote | {} {} --pipe {} {}",
-        tools.python, tools.gdbserver, tools.elf, path(&bin_path)
+        tools.python, tools.gdbserver, tools.elf, path(bin_path)
     );
     let gdb = Command::new(&tools.gdb)
         .args(["-q", "-batch", &tools.elf, "-ex", &remote, "-ex", "bt"])

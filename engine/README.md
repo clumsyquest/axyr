@@ -74,14 +74,13 @@ telemetry, just no call stack. Requires `pyelftools` for the coredump scripts.
 
 ### Coredump pipeline
 
-A crash (with `CONFIG_DEBUG_COREDUMP=y`) emits a `#CD:BEGIN# … #CD:END#` block
-over RTT. The agent collects it, runs Zephyr's parser to a binary coredump, and
-drives GDB offline (`coredump_gdbserver.py --pipe`) to get the `bt` frames, which
-are appended to the report.
-
-> **Known limitation:** emitting a full coredump through the Zephyr log subsystem
-> over RTT is slow (seconds) — a throughput issue to optimize (RTT buffer size /
-> a dedicated crash channel). The data arrives intact; it's just not fast yet.
+The firmware uses Zephyr's **IN_MEMORY coredump backend**: a fault writes the
+full dump to a RAM buffer (`in_memory_coredump`) instead of streaming it through
+the log subsystem. When the agent sees the `AXYR_CRASH` line, it resolves that
+buffer's address from the ELF, reads it in one SWD block (the core is halted
+after the fault), and drives GDB offline (`coredump_gdbserver.py --pipe`) on the
+raw bytes to get the `bt` frames. No log subsystem, no hex, no streaming — crash
+capture dropped from tens of seconds to ~3s (now dominated by the GDB spawn).
 
 ## Live state (variables)
 
