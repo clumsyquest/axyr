@@ -11,8 +11,15 @@ Debugging embedded systems often means flying blind: a board reboots, a HardFaul
 - `dashboard/` — web interface (TypeScript)
 - `docs/`      — design notes and documentation
 
+## What works today
+- **Crash post-mortem** — on a fault, a clear report: cause in plain words, function + `file:line`, the full **call stack** (Zephyr coredump replayed through GDB), and the **recent serial output** leading up to it.
+- **Debug-probe access (SWD)** — attach to a *running* core and read live memory/registers, reset, and flash, via [`probe-rs`](https://probe.rs). The universal backend, beyond any single RTOS.
+- **MCP for AI agents** — a stdio MCP server exposing `get_last_crash` plus board actions: `reboot_board`, `flash_firmware`, `read_memory`.
+
+See [`engine/README.md`](engine/README.md) for how to run it.
+
 ## Status
-🚧 Pre-v1. First target: the "crash explainer" for STM32 (Cortex-M) on Zephyr.
+🚧 Building toward the MVP on STM32 (Cortex-M) / Zephyr. The crash explainer works end to end and proved the thesis; the engine now reads live state and acts on the board over the debug probe. Next: richer live system state (threads, peripherals, variables). Other RTOSes and a built-in web agent come later.
 
 ## License
 Apache-2.0
