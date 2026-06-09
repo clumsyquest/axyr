@@ -5,7 +5,12 @@
 //! main thread is the MCP front-end (stdio, one JSON-RPC message per line): it
 //! serves read tools directly and routes action tools to the owner thread over a
 //! channel, so an agent's actions never disturb the real-time telemetry.
+//!
+//! A second front-end — an HTTP API (see [`serve_http`]) for the web dashboard —
+//! runs on its own thread and routes through the SAME dispatch, so the dashboard
+//! and an MCP agent always see the same view of the system.
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -15,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde_json::{Value, json};
+use tiny_http::{Header, Method, Response, Server};
 
 use axyr_engine::agent::{self, Action, Command, Config};
 use axyr_engine::coredump::CoredumpTools;
@@ -72,6 +78,22 @@ fn main() {
     let threads = Arc::new(Mutex::new(ThreadTable::new()));
     let threads_agent = threads.clone();
     thread::spawn(move || agent::run(probe, cfg, cmd_rx, threads_agent));
+
+    // The HTTP/WS-style API: a second front-end (alongside MCP stdio) that the
+    // web dashboard consumes. It routes to the SAME dispatch, so it never gets a
+    // different view of the system than an MCP agent does. Localhost-only by
+    // default; set AXYR_HTTP=off to disable, or AXYR_HTTP=<addr:port> to change.
+    let http_addr = env::var("AXYR_HTTP").unwrap_or_else(|_| "127.0.0.1:7878".to_string());
+    if http_addr != "off" {
+        let (cf, d, fw, tx, th) = (
+            crash_file.clone(),
+            dts.clone(),
+            firmware_dir.clone(),
+            cmd_tx.clone(),
+            threads.clone(),
+        );
+        thread::spawn(move || serve_http(&http_addr, &cf, d.as_deref(), fw.as_deref(), &tx, &th));
+    }
 
     serve_mcp(&crash_file, dts.as_deref(), firmware_dir.as_deref(), &cmd_tx, &threads);
 }
@@ -154,6 +176,11 @@ fn tool_definitions() -> Value {
         {
             "name": "get_system_map",
             "description": "Return the board's hardware map from the Zephyr devicetree: peripherals (I2C/SPI/UART/timers/GPIO) and the sensors/actuators on them, with addresses and on/off state.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "get_graph",
+            "description": "Return the system as a connected graph (board root + nodes with kind/address/status + parent->child edges like soc->i2c1->bme280), ready for a schematic/diagram view.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -295,6 +322,13 @@ fn dispatch_tool(
             let src = fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
             system_map::render(&src).ok_or_else(|| "could not parse devicetree".to_string())
         }
+        "get_graph" => {
+            let path = dts.ok_or("graph not configured (set AXYR_DTS)")?;
+            let src = fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+            system_map::graph_json(&src)
+                .map(|v| v.to_string())
+                .ok_or_else(|| "could not parse devicetree".to_string())
+        }
         "get_trace" => run_action(cmd_tx, Action::ReadTrace),
         "get_snapshot" => run_action(cmd_tx, Action::GetSnapshot),
         "get_health" => run_action(cmd_tx, Action::GetHealth),
@@ -383,4 +417,195 @@ fn parse_address(s: &str) -> Result<u64, String> {
         s.parse::<u64>()
     };
     parsed.map_err(|_| format!("invalid address: {s:?}"))
+}
+
+/// HTTP API for the dashboard: a second front-end alongside MCP stdio. Each route
+/// maps to a tool and runs through the SAME [`dispatch_tool`], so the web UI never
+/// sees a different view of the system than an MCP agent does. Responses are JSON
+/// for the JSON tools and plain text otherwise; CORS is permissive so a dashboard
+/// served from another origin can fetch it.
+fn serve_http(
+    addr: &str,
+    crash_file: &str,
+    dts: Option<&str>,
+    firmware_dir: Option<&str>,
+    cmd_tx: &Sender<Command>,
+    threads: &Arc<Mutex<ThreadTable>>,
+) {
+    let server = match Server::http(addr) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("HTTP API disabled (bind {addr}: {e})");
+            return;
+        }
+    };
+    eprintln!("HTTP API on http://{addr}");
+
+    for mut request in server.incoming_requests() {
+        let method = request.method().clone();
+        let url = request.url().to_string();
+        let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
+        let q = parse_query(query);
+
+        // CORS preflight.
+        if method == Method::Options {
+            let _ = request.respond(
+                Response::empty(204)
+                    .with_header(header("Access-Control-Allow-Origin", "*"))
+                    .with_header(header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
+                    .with_header(header("Access-Control-Allow-Headers", "Content-Type")),
+            );
+            continue;
+        }
+
+        // Index route describes the API.
+        if method == Method::Get && path == "/" {
+            let _ = request.respond(json_ok(&http_index()));
+            continue;
+        }
+
+        // POST body (for action routes).
+        let body_json: Value = if method == Method::Post {
+            let mut body = String::new();
+            let _ = request.as_reader().read_to_string(&mut body);
+            serde_json::from_str(&body).unwrap_or_else(|_| json!({}))
+        } else {
+            json!({})
+        };
+
+        // Map (method, path) -> (tool, args).
+        let routed: Option<(&str, Value)> = match (&method, path) {
+            (Method::Get, "/snapshot") => Some(("get_snapshot", json!({}))),
+            (Method::Get, "/graph") => Some(("get_graph", json!({}))),
+            (Method::Get, "/system_map") => Some(("get_system_map", json!({}))),
+            (Method::Get, "/threads") => Some(("get_threads", json!({}))),
+            (Method::Get, "/trace") => Some(("get_trace", json!({}))),
+            (Method::Get, "/history") => Some(("get_history", json!({}))),
+            (Method::Get, "/health") => Some(("get_health", json!({}))),
+            (Method::Get, "/crash") => Some(("get_last_crash", json!({}))),
+            (Method::Get, "/variables") => Some(("list_variables", json!({}))),
+            (Method::Get, "/peripherals") => Some(("list_peripherals", json!({}))),
+            (Method::Get, "/firmware") => Some(("list_firmware", json!({}))),
+            (Method::Get, "/variable") => Some(("read_variable", json!({ "name": q.get("name") }))),
+            (Method::Get, "/peripheral") => {
+                Some(("read_peripheral", json!({ "name": q.get("name") })))
+            }
+            (Method::Get, "/memory") => Some((
+                "read_memory",
+                json!({
+                    "address": q.get("address"),
+                    "count": q.get("count").and_then(|c| c.parse::<u64>().ok()),
+                }),
+            )),
+            (Method::Post, "/reboot") => Some(("reboot_board", json!({}))),
+            (Method::Post, "/diff") => Some(("diff_snapshot", json!({}))),
+            (Method::Post, "/flash") => Some(("flash_firmware", body_json.clone())),
+            (Method::Post, "/watch") => Some(("watch_until", body_json.clone())),
+            _ => None,
+        };
+
+        let response = match routed {
+            Some((tool, args)) => {
+                match dispatch_tool(tool, &args, crash_file, dts, firmware_dir, cmd_tx, threads) {
+                    Ok(text) => json_ok(&text),
+                    Err(text) => text_response(text, 400),
+                }
+            }
+            None => text_response("not found".to_string(), 404),
+        };
+        let _ = request.respond(response);
+    }
+}
+
+/// A 200 response, JSON content-type when the body looks like JSON, with CORS.
+fn json_ok(text: &str) -> Response<io::Cursor<Vec<u8>>> {
+    let trimmed = text.trim_start();
+    let ct = if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        "application/json"
+    } else {
+        "text/plain; charset=utf-8"
+    };
+    Response::from_string(text)
+        .with_header(header("Content-Type", ct))
+        .with_header(header("Access-Control-Allow-Origin", "*"))
+}
+
+/// A plain-text response with the given status code, with CORS.
+fn text_response(text: String, status: u16) -> Response<io::Cursor<Vec<u8>>> {
+    Response::from_string(text)
+        .with_status_code(status)
+        .with_header(header("Content-Type", "text/plain; charset=utf-8"))
+        .with_header(header("Access-Control-Allow-Origin", "*"))
+}
+
+fn header(key: &str, value: &str) -> Header {
+    Header::from_bytes(key.as_bytes(), value.as_bytes()).expect("valid header")
+}
+
+/// Parse a URL query string into a key→value map (percent-decoded).
+fn parse_query(query: &str) -> HashMap<String, String> {
+    query
+        .split('&')
+        .filter(|s| !s.is_empty())
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.to_string(), urldecode(v)))
+        .collect()
+}
+
+/// Minimal percent-decoding (`+` → space, `%XX` → byte) for query values.
+fn urldecode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 3 <= bytes.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                Ok(b) => {
+                    out.push(b);
+                    i += 3;
+                }
+                Err(_) => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+/// JSON description of the HTTP API, served at `/`.
+fn http_index() -> String {
+    json!({
+        "service": "axyr-engine",
+        "endpoints": {
+            "GET /snapshot": "whole system snapshot (JSON)",
+            "GET /graph": "system as nodes+edges for the schematic view (JSON)",
+            "GET /system_map": "hardware map (text)",
+            "GET /threads": "RTOS thread state (text)",
+            "GET /trace": "context-switch timeline (text)",
+            "GET /history": "recorded time-series of system state (JSON)",
+            "GET /health": "anomaly checks (text)",
+            "GET /crash": "last captured crash (text)",
+            "GET /variables": "global variables from the ELF (text)",
+            "GET /peripherals": "chip peripherals from the SVD (text)",
+            "GET /firmware": "flashable images on the host (text)",
+            "GET /variable?name=<sym>": "read one global live",
+            "GET /peripheral?name=<NAME>": "decode one peripheral live",
+            "GET /memory?address=<hex>&count=<n>": "read memory words",
+            "POST /reboot": "reset the board",
+            "POST /diff": "snapshot diff vs previous",
+            "POST /flash {path}": "flash an ELF image",
+            "POST /watch {name,value}": "non-intrusive wait for a value"
+        }
+    })
+    .to_string()
 }

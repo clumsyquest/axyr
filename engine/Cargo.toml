@@ -10,3 +10,4 @@ probe-rs = "0.31.0"
 serde_json = "1.0.150"
 serialport = "4.9.0"
 svd-parser = { version = "0.14.9", features = ["expand"] }
+tiny_http = "0.12.0"
