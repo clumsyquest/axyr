@@ -38,6 +38,11 @@ impl Probe {
         Ok(Self { session })
     }
 
+    /// Mutable access to the underlying session (e.g. for RTT telemetry).
+    pub fn session_mut(&mut self) -> &mut Session {
+        &mut self.session
+    }
+
     /// Read a 32-bit word from target memory. Works while the core runs.
     pub fn read_word(&mut self, address: u64) -> Result<u32, String> {
         let mut core = self.session.core(0).map_err(|e| format!("core: {e}"))?;
