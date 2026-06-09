@@ -25,13 +25,12 @@ use axyr_engine::system_map;
 fn main() {
     // Usage: axyr-engine <elf> <addr2line> <crash-file>
     let args: Vec<String> = env::args().collect();
-    if args.len() != 4 {
-        eprintln!("usage: {} <elf> <addr2line> <crash-file>", args[0]);
+    if args.len() != 3 {
+        eprintln!("usage: {} <elf> <crash-file>", args[0]);
         std::process::exit(1);
     }
     let elf = args[1].clone();
-    let addr2line = args[2].clone();
-    let crash_file = args[3].clone();
+    let crash_file = args[2].clone();
 
     let chip = env::var("AXYR_CHIP").unwrap_or_else(|_| DEFAULT_CHIP.to_string());
     let dts = env::var("AXYR_DTS").ok();
@@ -62,7 +61,6 @@ fn main() {
         .unwrap_or_default();
     let cfg = Config {
         elf,
-        addr2line,
         crash_file: crash_file.clone(),
         coredump,
         svd_path,
