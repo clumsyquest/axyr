@@ -116,6 +116,7 @@ pub fn run(
     let mut recent_log = RecentLog::new(RECENT_LOG_LINES);
     let mut last_crash: Option<Value> = None;
     let mut last_snapshot: Option<Value> = None;
+    let mut link_errors = 0u32;
     let mut line = String::new();
     let mut buf = [0u8; 1024];
 
@@ -123,9 +124,11 @@ pub fn run(
         // 1. Drain telemetry fully this cycle. A crash is signalled by the
         //    AXYR_CRASH line; the heavy work happens after the drain.
         let mut crash: Option<Crash> = None;
+        let mut read_failed = false;
         loop {
             match telemetry.read(probe.session_mut(), &mut buf) {
-                Ok(n) if n > 0 => {
+                Ok(0) => break,
+                Ok(n) => {
                     for &b in &buf[..n] {
                         match b {
                             b'\n' => {
@@ -139,8 +142,29 @@ pub fn run(
                         }
                     }
                 }
-                _ => break,
+                Err(_) => {
+                    read_failed = true;
+                    break;
+                }
             }
+        }
+
+        // Self-heal a wedged SWD link: after a few failed cycles, re-open the
+        // probe and re-attach RTT — no human needed.
+        if read_failed {
+            link_errors += 1;
+            if link_errors >= 3 {
+                eprintln!("agent: SWD link errors — reattaching...");
+                if probe.reattach().is_ok()
+                    && let Ok(t) = Telemetry::attach(probe.session_mut())
+                {
+                    telemetry = t;
+                    eprintln!("agent: link recovered");
+                }
+                link_errors = 0;
+            }
+        } else {
+            link_errors = 0;
         }
 
         // 2. On a crash, read the coredump from RAM over SWD and write the report.
