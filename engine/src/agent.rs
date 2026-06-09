@@ -13,6 +13,7 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -20,8 +21,8 @@ use crate::coredump::{CoredumpTools, resolve_backtrace_from_bin};
 use crate::probe::Probe;
 use crate::recent_log::RecentLog;
 use crate::rtt::Telemetry;
-use crate::symbols;
-use crate::{Crash, format_report, parse_crash_line, symbolize};
+use crate::threads::ThreadTable;
+use crate::{Crash, format_report, parse_crash_line, symbolize, symbols};
 
 /// How many recent telemetry lines to keep as "what was happening just before".
 const RECENT_LOG_LINES: usize = 20;
@@ -50,7 +51,13 @@ pub struct Config {
 }
 
 /// Run the probe-owner loop forever: drain RTT, capture crashes, run commands.
-pub fn run(mut probe: Probe, cfg: Config, commands: Receiver<Command>) {
+/// `threads` is shared with the MCP front-end so `get_threads` can read it.
+pub fn run(
+    mut probe: Probe,
+    cfg: Config,
+    commands: Receiver<Command>,
+    threads: Arc<Mutex<ThreadTable>>,
+) {
     // Where the IN_MEMORY coredump buffer lives in RAM (resolved from the ELF).
     let coredump_addr = symbols::resolve(&cfg.elf, COREDUMP_SYMBOL)
         .map(|s| s.address)
@@ -83,7 +90,7 @@ pub fn run(mut probe: Probe, cfg: Config, commands: Receiver<Command>) {
                     for &b in &buf[..n] {
                         match b {
                             b'\n' => {
-                                if let Some(c) = process_line(line.trim(), &mut recent_log) {
+                                if let Some(c) = process_line(line.trim(), &mut recent_log, &threads) {
                                     crash = Some(c);
                                 }
                                 line.clear();
@@ -113,9 +120,17 @@ pub fn run(mut probe: Probe, cfg: Config, commands: Receiver<Command>) {
     }
 }
 
-/// Record a telemetry line and, if it is the crash packet, return the parsed crash.
-fn process_line(line: &str, recent_log: &mut RecentLog) -> Option<Crash> {
+/// Record a telemetry line (recent log + thread state) and, if it is the crash
+/// packet, return the parsed crash.
+fn process_line(
+    line: &str,
+    recent_log: &mut RecentLog,
+    threads: &Arc<Mutex<ThreadTable>>,
+) -> Option<Crash> {
     recent_log.record(line);
+    if let Ok(mut t) = threads.lock() {
+        t.feed(line);
+    }
     parse_crash_line(line)
 }
 
