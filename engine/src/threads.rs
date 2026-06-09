@@ -41,6 +41,24 @@ impl ThreadTable {
         self.threads.is_empty()
     }
 
+    /// Structured thread list as JSON (for the snapshot contract).
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::Value::Array(
+            self.threads
+                .values()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "stack_used": t.stack_used,
+                        "stack_total": t.stack_total,
+                        "stack_pct": t.stack_pct,
+                        "cpu_pct": t.cpu_pct,
+                    })
+                })
+                .collect(),
+        )
+    }
+
     /// Human/agent-readable rendering.
     pub fn render(&self) -> String {
         if self.threads.is_empty() {

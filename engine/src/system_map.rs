@@ -110,6 +110,62 @@ pub fn kind(compatible: &str) -> &'static str {
         .unwrap_or("device")
 }
 
+/// The board model string (`model` property of the root), for `device.board`.
+pub fn model(dts: &str) -> Option<String> {
+    parse(dts)?.prop("model").and_then(first_string)
+}
+
+/// Structured system map as JSON (for the snapshot contract):
+/// `{ source, devices: [tree], disabled: [labels] }`.
+pub fn to_json(dts: &str) -> Option<serde_json::Value> {
+    let root = parse(dts)?;
+    let mut devices = Vec::new();
+    let mut disabled = Vec::new();
+    collect_json(&root, &mut devices, &mut disabled);
+    Some(serde_json::json!({
+        "source": "zephyr devicetree",
+        "devices": devices,
+        "disabled": disabled,
+    }))
+}
+
+/// Walk children into JSON device nodes; structural wrappers (no compatible)
+/// flatten their device descendants into the current level.
+fn collect_json(
+    node: &Node,
+    devices: &mut Vec<serde_json::Value>,
+    disabled: &mut Vec<String>,
+) {
+    for child in &node.children {
+        let Some(compatible) = child.compatible() else {
+            collect_json(child, devices, disabled);
+            continue;
+        };
+        if compatible.contains("pinctrl") || child.prop("pinmux").is_some() {
+            continue; // wiring noise, not a device
+        }
+        let label = if child.labels.is_empty() {
+            display_name(child)
+        } else {
+            child.labels.join(" ")
+        };
+        if child.status() == "disabled" {
+            disabled.push(label);
+            continue;
+        }
+        let mut children = Vec::new();
+        collect_json(child, &mut children, disabled);
+        devices.push(serde_json::json!({
+            "label": label,
+            "kind": kind(&compatible),
+            "compatible": compatible,
+            "address": child.address().map(|a| format!("{a:#010x}")),
+            "status": "okay",
+            "children": children,
+        }));
+    }
+}
+
 /// Parse a devicetree source string into its root node.
 pub fn parse(dts: &str) -> Option<Node> {
     let stripped = strip_comments(dts);

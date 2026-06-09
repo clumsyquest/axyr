@@ -32,7 +32,7 @@
       "additionalProperties": false,
       "properties": {
         "core": { "type": "string", "enum": ["running", "sleeping", "halted", "crashed", "unknown"] },
-        "summary": { "type": "string" },
+        "summary": { "type": ["string", "null"] },
         "reset_reason": { "type": ["string", "null"], "description": "Why the chip last reset (from RCC flags)." },
         "clocks": { "type": ["string", "null"], "description": "Clock-tree summary (from RCC)." }
       }

@@ -47,7 +47,24 @@ fn main() {
     });
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
     let svd_path = env::var("AXYR_SVD").ok();
-    let cfg = Config { elf, addr2line, crash_file: crash_file.clone(), coredump, svd_path };
+    let watch = env::var("AXYR_WATCH")
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let cfg = Config {
+        elf,
+        addr2line,
+        crash_file: crash_file.clone(),
+        coredump,
+        svd_path,
+        chip: chip.clone(),
+        dts_path: dts.clone(),
+        watch,
+    };
     // Shared live thread state: the agent updates it, the MCP front-end reads it.
     let threads = Arc::new(Mutex::new(ThreadTable::new()));
     let threads_agent = threads.clone();
@@ -159,6 +176,11 @@ fn tool_definitions() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "get_snapshot",
+            "description": "Return the whole system in one structured JSON snapshot (the data contract): device, state (reset reason/clocks), hardware map, threads, timeline, watched variables, decoded peripherals, and the last crash. Use this to understand and map the real system state.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "read_variable",
             "description": "Read a firmware global variable live by name: resolves its address from the ELF and reads it over SWD (works while the core runs or sleeps, no halt).",
             "inputSchema": {
@@ -214,6 +236,7 @@ fn dispatch_tool(
             system_map::render(&src).ok_or_else(|| "could not parse devicetree".to_string())
         }
         "get_trace" => run_action(cmd_tx, Action::ReadTrace),
+        "get_snapshot" => run_action(cmd_tx, Action::GetSnapshot),
         "read_variable" => {
             let name = args
                 .get("name")
