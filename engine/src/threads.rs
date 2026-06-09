@@ -41,6 +41,11 @@ impl ThreadTable {
         self.threads.is_empty()
     }
 
+    /// The threads as a list (for health checks).
+    pub fn infos(&self) -> Vec<ThreadInfo> {
+        self.threads.values().cloned().collect()
+    }
+
     /// Structured thread list as JSON (for the snapshot contract).
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::Value::Array(
