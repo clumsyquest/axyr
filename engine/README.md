@@ -56,7 +56,7 @@ cargo test
 ## Run
 
 ```bash
-axyr-engine <elf> <addr2line> <crash-file>
+axyr-engine <elf> <crash-file>
 ```
 
 Example:
@@ -70,10 +70,7 @@ export AXYR_GDB=~/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb
 export AXYR_COREDUMP_LOG_PARSER=~/zephyrproject/zephyr/scripts/coredump/coredump_serial_log_parser.py
 export AXYR_COREDUMP_GDBSERVER=~/zephyrproject/zephyr/scripts/coredump/coredump_gdbserver.py
 
-axyr-engine \
-  ~/zephyrproject/zephyr/build/zephyr/zephyr.elf \
-  ~/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-addr2line \
-  /tmp/last_crash.txt
+axyr-engine ~/zephyrproject/zephyr/build/zephyr/zephyr.elf /tmp/last_crash.txt
 ```
 
 If the coredump vars are unset, the report still has cause + location + recent

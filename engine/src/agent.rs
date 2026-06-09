@@ -75,7 +75,6 @@ pub struct Command {
 /// Static configuration the owner loop needs for the crash pipeline.
 pub struct Config {
     pub elf: String,
-    pub addr2line: String,
     pub crash_file: String,
     pub coredump: Option<CoredumpTools>,
     /// Path to the chip's SVD, for decoding peripheral registers.
@@ -263,7 +262,7 @@ fn report_crash(
     crash: &Crash,
     recent_log: &RecentLog,
 ) -> Option<Value> {
-    let location = symbolize(&cfg.addr2line, &cfg.elf, &crash.pc);
+    let location = symbolize(&cfg.elf, &crash.pc);
     let mut report = format_report(crash, &location);
 
     // Read the in-memory coredump (core is halted after the fault) and unwind it.

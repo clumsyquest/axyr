@@ -1,5 +1,3 @@
-use std::process::Command;
-
 pub mod agent;
 pub mod coredump;
 pub mod diff;
@@ -37,13 +35,20 @@ pub fn parse_crash_line(line: &str) -> Option<Crash> {
     Some(Crash { reason, pc: pc?.to_string() })
 }
 
-/// Resolve a program-counter address to "function at file:line" via addr2line.
-pub fn symbolize(addr2line: &str, elf: &str, pc: &str) -> String {
-    let output = Command::new(addr2line)
-        .args(["-e", elf, "-f", "-p", pc])
-        .output()
-        .expect("failed to run addr2line");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+/// Resolve a program-counter address to "function at file:line", in-process via
+/// the `addr2line` crate (DWARF) — no external `addr2line` binary needed.
+pub fn symbolize(elf: &str, pc: &str) -> String {
+    let addr = u64::from_str_radix(pc.trim().trim_start_matches("0x").trim_start_matches("0X"), 16)
+        .unwrap_or(0);
+    let loader = match addr2line::Loader::new(elf) {
+        Ok(l) => l,
+        Err(e) => return format!("?? (symbolize {elf}: {e})"),
+    };
+    let func = loader.find_symbol(addr).unwrap_or("??").to_string();
+    match loader.find_location(addr) {
+        Ok(Some(loc)) => format!("{func} at {}:{}", loc.file.unwrap_or("?"), loc.line.unwrap_or(0)),
+        _ => format!("{func} at ?"),
+    }
 }
 
 /// Build the human-readable crash report.
