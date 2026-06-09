@@ -11,6 +11,7 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde_json::{Value, json};
@@ -18,6 +19,7 @@ use serde_json::{Value, json};
 use axyr_engine::agent::{self, Action, Command, Config};
 use axyr_engine::coredump::CoredumpTools;
 use axyr_engine::probe::{DEFAULT_CHIP, Probe};
+use axyr_engine::threads::ThreadTable;
 use axyr_engine::system_map;
 
 fn main() {
@@ -45,13 +47,21 @@ fn main() {
     });
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
     let cfg = Config { elf, addr2line, crash_file: crash_file.clone(), coredump };
-    thread::spawn(move || agent::run(probe, cfg, cmd_rx));
+    // Shared live thread state: the agent updates it, the MCP front-end reads it.
+    let threads = Arc::new(Mutex::new(ThreadTable::new()));
+    let threads_agent = threads.clone();
+    thread::spawn(move || agent::run(probe, cfg, cmd_rx, threads_agent));
 
-    serve_mcp(&crash_file, dts.as_deref(), &cmd_tx);
+    serve_mcp(&crash_file, dts.as_deref(), &cmd_tx, &threads);
 }
 
 /// MCP over stdio: one JSON-RPC message per line.
-fn serve_mcp(crash_file: &str, dts: Option<&str>, cmd_tx: &Sender<Command>) {
+fn serve_mcp(
+    crash_file: &str,
+    dts: Option<&str>,
+    cmd_tx: &Sender<Command>,
+    threads: &Arc<Mutex<ThreadTable>>,
+) {
     let stdin = io::stdin();
     let stdout = io::stdout();
 
@@ -88,7 +98,7 @@ fn serve_mcp(crash_file: &str, dts: Option<&str>, cmd_tx: &Sender<Command>) {
             "tools/call" => {
                 let tool = req.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
                 let args = req.pointer("/params/arguments").cloned().unwrap_or(json!({}));
-                let result = dispatch_tool(tool, &args, crash_file, dts, cmd_tx);
+                let result = dispatch_tool(tool, &args, crash_file, dts, cmd_tx, threads);
                 Some(match result {
                     Ok(text) => json!({
                         "jsonrpc": "2.0", "id": id,
@@ -121,6 +131,11 @@ fn tool_definitions() -> Value {
         {
             "name": "get_system_map",
             "description": "Return the board's hardware map from the Zephyr devicetree: peripherals (I2C/SPI/UART/timers/GPIO) and the sensors/actuators on them, with addresses and on/off state.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "get_threads",
+            "description": "Return the live RTOS thread state: per-thread stack usage and CPU load (from the firmware's thread analyzer over RTT).",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -160,10 +175,15 @@ fn dispatch_tool(
     crash_file: &str,
     dts: Option<&str>,
     cmd_tx: &Sender<Command>,
+    threads: &Arc<Mutex<ThreadTable>>,
 ) -> Result<String, String> {
     match tool {
         "get_last_crash" => Ok(fs::read_to_string(crash_file)
             .unwrap_or_else(|_| "No crash recorded yet.".to_string())),
+        "get_threads" => Ok(threads
+            .lock()
+            .map_err(|_| "thread state lock poisoned".to_string())?
+            .render()),
         "get_system_map" => {
             let path = dts.ok_or("system map not configured (set AXYR_DTS)")?;
             let src = fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;

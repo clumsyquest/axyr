@@ -6,6 +6,7 @@ pub mod probe;
 pub mod recent_log;
 pub mod rtt;
 pub mod symbols;
+pub mod threads;
 pub mod system_map;
 
 /// A crash captured from the device.

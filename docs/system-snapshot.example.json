@@ -72,6 +72,15 @@
         { "name": "SCB ICSR", "address": "0xE000ED04", "value": "0x0400f805" }
       ]
     },
+    "threads": {
+      "status": "live (Zephyr thread analyzer over RTT)",
+      "list": [
+        { "name": "main", "stack_used": 320, "stack_total": 1024, "stack_pct": 31, "cpu_pct": 0 },
+        { "name": "idle", "stack_used": 64, "stack_total": 320, "stack_pct": 20, "cpu_pct": 99 },
+        { "name": "thread_analyzer", "stack_used": 552, "stack_total": 1024, "stack_pct": 53, "cpu_pct": 0 },
+        { "name": "ISR0", "stack_used": 168, "stack_total": 2048, "stack_pct": 8, "cpu_pct": 0 }
+      ]
+    },
     "variables": {
       "status": "planned (deterministic watch via a low-priority on-device sampler over RTT)",
       "watch": [
