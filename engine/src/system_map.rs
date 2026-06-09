@@ -166,6 +166,71 @@ fn collect_json(
     }
 }
 
+/// The system as a connected graph for the dashboard's schematic view:
+/// `{ board, nodes: [{id, kind, address, status}], edges: [{from, to}], disabled }`.
+///
+/// A synthetic `board` root connects the otherwise-parentless top-level devices
+/// (CPU, RAM, clocks, sensors, headers…), and each device links to its parent
+/// (`soc -> i2c1 -> bme280`). This is the same data as [`to_json`], flattened
+/// into nodes+edges so a graph view can lay it out directly.
+pub fn graph_json(dts: &str) -> Option<serde_json::Value> {
+    let root = parse(dts)?;
+    let board = root
+        .prop("model")
+        .and_then(first_string)
+        .unwrap_or_else(|| "board".to_string());
+    let mut nodes = vec![serde_json::json!({
+        "id": "board", "kind": "board", "address": serde_json::Value::Null, "status": "okay",
+    })];
+    let mut edges = Vec::new();
+    let mut disabled = Vec::new();
+    collect_graph(&root, "board", &mut nodes, &mut edges, &mut disabled);
+    Some(serde_json::json!({
+        "board": board,
+        "nodes": nodes,
+        "edges": edges,
+        "disabled": disabled,
+    }))
+}
+
+/// Walk children into flat graph nodes + `parent -> child` edges; structural
+/// wrappers (no compatible) flatten into the current parent, mirroring
+/// [`collect_json`] but emitting a graph instead of a tree.
+fn collect_graph(
+    node: &Node,
+    parent: &str,
+    nodes: &mut Vec<serde_json::Value>,
+    edges: &mut Vec<serde_json::Value>,
+    disabled: &mut Vec<String>,
+) {
+    for child in &node.children {
+        let Some(compatible) = child.compatible() else {
+            collect_graph(child, parent, nodes, edges, disabled);
+            continue;
+        };
+        if compatible.contains("pinctrl") || child.prop("pinmux").is_some() {
+            continue; // wiring noise, not a device
+        }
+        let label = if child.labels.is_empty() {
+            display_name(child)
+        } else {
+            child.labels.join(" ")
+        };
+        if child.status() == "disabled" {
+            disabled.push(label);
+            continue;
+        }
+        nodes.push(serde_json::json!({
+            "id": label,
+            "kind": kind(&compatible),
+            "address": child.address().map(|a| format!("{a:#010x}")),
+            "status": "okay",
+        }));
+        edges.push(serde_json::json!({ "from": parent, "to": label }));
+        collect_graph(child, &label, nodes, edges, disabled);
+    }
+}
+
 /// Parse a devicetree source string into its root node.
 pub fn parse(dts: &str) -> Option<Node> {
     let stripped = strip_comments(dts);
@@ -497,6 +562,24 @@ mod tests {
         assert_eq!(kind("gpio-keys"), "button");
         assert_eq!(kind("st,stm32-gpio"), "gpio"); // generic gpio, not a led
         assert_eq!(kind("acme,unknown-thing"), "device");
+    }
+
+    #[test]
+    fn graph_is_board_rooted_with_sensor_on_its_bus() {
+        let g = graph_json(SAMPLE).unwrap();
+        assert_eq!(g["board"], "Demo Board");
+        let edges = g["edges"].as_array().unwrap();
+        let has = |from: &str, to: &str| {
+            edges.iter().any(|e| {
+                e["from"].as_str().is_some_and(|f| f.contains(from))
+                    && e["to"].as_str().is_some_and(|t| t.contains(to))
+            })
+        };
+        assert!(has("board", "i2c1")); // top-level device links to the board root
+        assert!(has("i2c1", "bme280")); // sensor links to its bus
+        assert_eq!(g["disabled"].as_array().unwrap().len(), 1); // i2c2 disabled
+        // The board root node is present.
+        assert!(g["nodes"].as_array().unwrap().iter().any(|n| n["id"] == "board"));
     }
 
     #[test]
