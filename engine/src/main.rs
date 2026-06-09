@@ -188,6 +188,11 @@ fn tool_definitions() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "get_history",
+            "description": "Return the recorded time-series of system state (threads, watched variables, core state per tick) — the data to animate the system over time, not just one frame.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "diff_snapshot",
             "description": "Take a fresh snapshot and report what changed since the previous one (values, registers, state, threads) — 'what moved since it was working'.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -273,6 +278,7 @@ fn dispatch_tool(
         "get_snapshot" => run_action(cmd_tx, Action::GetSnapshot),
         "get_health" => run_action(cmd_tx, Action::GetHealth),
         "diff_snapshot" => run_action(cmd_tx, Action::DiffSnapshot),
+        "get_history" => run_action(cmd_tx, Action::GetHistory),
         "list_variables" => run_action(cmd_tx, Action::ListVariables),
         "list_peripherals" => run_action(cmd_tx, Action::ListPeripherals),
         "read_variable" => {
