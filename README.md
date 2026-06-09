@@ -9,7 +9,7 @@ Debugging embedded systems often means flying blind: a board reboots, a HardFaul
 - `firmware/`  — on-device code (C, Zephyr) running on the chip
 - `engine/`    — host engine + MCP server (Rust)
 - `dashboard/` — web interface (TypeScript)
-- `docs/`      — design notes and documentation (see [`docs/architecture.md`](docs/architecture.md))
+- `docs/`      — design notes and documentation (see [`docs/architecture.md`](docs/architecture.md) and the [data contract](docs/data-contract.md))
 
 ## What works today
 - **Crash post-mortem** — on a fault, a clear report: cause in plain words, function + `file:line`, the full **call stack** (Zephyr coredump replayed through GDB), and the **recent serial output** leading up to it.

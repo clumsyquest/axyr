@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://axyr.dev/schemas/system-snapshot-1.0.json",
+  "title": "Axyr System Snapshot",
+  "description": "The data contract Axyr exposes to a dashboard and to AI agents: a snapshot of an embedded system's real state. Stable v1 shape.",
+  "type": "object",
+  "required": ["schema_version", "device", "state", "system_map", "actions"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "captured_at": { "type": "string", "description": "ISO-8601 UTC timestamp of this snapshot." },
+
+    "device": {
+      "type": "object",
+      "description": "Identity of the target.",
+      "required": ["chip"],
+      "additionalProperties": false,
+      "properties": {
+        "board": { "type": "string" },
+        "chip": { "type": "string" },
+        "core": { "type": "string", "description": "CPU core, e.g. \"ARM Cortex-M4F\"." },
+        "cpuid": { "type": "string", "description": "Hex CPUID register value." },
+        "probe": { "type": "string", "description": "Debug probe, e.g. \"ST-LINK/V2.1\"." },
+        "transport": { "type": "string", "description": "How telemetry is read, e.g. \"RTT\"." }
+      }
+    },
+
+    "state": {
+      "type": "object",
+      "description": "Current high-level state of the core.",
+      "required": ["core"],
+      "additionalProperties": false,
+      "properties": {
+        "core": { "type": "string", "enum": ["running", "sleeping", "halted", "crashed", "unknown"] },
+        "summary": { "type": "string" },
+        "reset_reason": { "type": ["string", "null"], "description": "Why the chip last reset (from RCC flags)." },
+        "clocks": { "type": ["string", "null"], "description": "Clock-tree summary (from RCC)." }
+      }
+    },
+
+    "system_map": {
+      "type": "object",
+      "description": "The static hardware map (from the OS devicetree / equivalent).",
+      "required": ["devices"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string", "description": "Where the map came from, e.g. \"zephyr devicetree\"." },
+        "devices": { "type": "array", "items": { "$ref": "#/$defs/device_node" } },
+        "disabled": { "type": "array", "items": { "type": "string" }, "description": "Labels of declared-but-disabled devices." }
+      }
+    },
+
+    "threads": {
+      "type": "array",
+      "description": "Live RTOS threads (empty if not an RTOS / not available).",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "stack_used": { "type": "integer" },
+          "stack_total": { "type": "integer" },
+          "stack_pct": { "type": "integer" },
+          "cpu_pct": { "type": "integer" }
+        }
+      }
+    },
+
+    "timeline": {
+      "type": "array",
+      "description": "Recent context switches, oldest first ('what ran when').",
+      "items": {
+        "type": "object",
+        "required": ["cycles", "thread"],
+        "additionalProperties": false,
+        "properties": {
+          "cycles": { "type": "integer", "description": "Cycle timestamp (CPU cycles)." },
+          "thread": { "type": "string" }
+        }
+      }
+    },
+
+    "variables": {
+      "type": "array",
+      "description": "Watched global variables, read live over the probe.",
+      "items": {
+        "type": "object",
+        "required": ["name", "address", "value"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "address": { "type": "string", "description": "Hex address." },
+          "type": { "type": "string" },
+          "value": { "type": ["integer", "string", "null"] }
+        }
+      }
+    },
+
+    "peripherals": {
+      "type": "array",
+      "description": "Decoded peripheral state (on demand; non-intrusive).",
+      "items": {
+        "type": "object",
+        "required": ["name", "address", "registers"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "address": { "type": "string" },
+          "registers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "value"],
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string" },
+                "value": { "type": "string", "description": "Hex register value." },
+                "fields": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["name", "value"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": { "type": "string" },
+                      "value": { "type": "integer" },
+                      "meaning": { "type": ["string", "null"], "description": "Symbolic meaning from the SVD." }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "crash": {
+      "description": "The last crash post-mortem, or null if none.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["cause", "location"],
+          "additionalProperties": false,
+          "properties": {
+            "cause": { "type": "string" },
+            "reason_code": { "type": "integer" },
+            "fault_address": { "type": ["string", "null"] },
+            "location": { "$ref": "#/$defs/source_location" },
+            "call_stack": {
+              "type": "array",
+              "items": {
+                "allOf": [
+                  { "$ref": "#/$defs/source_location" },
+                  { "type": "object", "properties": { "frame": { "type": "integer" } } }
+                ]
+              }
+            },
+            "registers": { "type": "object", "additionalProperties": { "type": "string" } },
+            "recent_telemetry": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      ]
+    },
+
+    "actions": {
+      "type": "array",
+      "description": "What an agent can do to the board (MCP tools).",
+      "items": {
+        "type": "object",
+        "required": ["name", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "kind": { "type": "string", "enum": ["read", "action"] },
+          "args": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  },
+
+  "$defs": {
+    "device_node": {
+      "type": "object",
+      "required": ["label", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string" },
+        "kind": { "type": "string", "description": "led | button | sensor | i2c bus | spi bus | uart | adc | timer | gpio | clock | core | flash | ram | ... " },
+        "compatible": { "type": "string" },
+        "address": { "type": ["string", "null"], "description": "Hex base address." },
+        "status": { "type": "string", "enum": ["okay", "disabled"] },
+        "children": { "type": "array", "items": { "$ref": "#/$defs/device_node" } }
+      }
+    },
+    "source_location": {
+      "type": "object",
+      "required": ["function"],
+      "additionalProperties": true,
+      "properties": {
+        "function": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer" }
+      }
+    }
+  }
+}
