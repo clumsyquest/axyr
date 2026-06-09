@@ -9,9 +9,11 @@
 
 use std::path::Path;
 
+use std::time::Duration;
+
 use probe_rs::flashing::{Format, download_file};
 use probe_rs::probe::list::Lister;
-use probe_rs::{MemoryInterface, Permissions, Session};
+use probe_rs::{CoreStatus, MemoryInterface, Permissions, Session};
 
 /// The chip on the Nucleo-F401RE. Will become configurable as we add targets.
 pub const DEFAULT_CHIP: &str = "STM32F401RETx";
@@ -50,6 +52,32 @@ impl Probe {
         let mut core = self.session.core(0).map_err(|e| format!("core: {e}"))?;
         core.read_32(address, out)
             .map_err(|e| format!("read {} words @ {address:#010x}: {e}", out.len()))
+    }
+
+    /// Read `out.len()` words with a brief halt-read-resume "snapshot".
+    ///
+    /// On this ST-LINK, SRAM is only accessible to the debugger while the core
+    /// is halted (a running/sleeping core returns zeros for AHB memory). So to
+    /// read live variables correctly we momentarily halt, sample, and resume —
+    /// a sub-millisecond pause. Truly zero-overhead background reads would need
+    /// a different probe (J-Link) or an RTT channel; this is the pragmatic path.
+    pub fn read_words_snapshot(&mut self, address: u64, out: &mut [u32]) -> Result<(), String> {
+        let mut core = self.session.core(0).map_err(|e| format!("core: {e}"))?;
+        let was_running = !matches!(
+            core.status().map_err(|e| format!("status: {e}"))?,
+            CoreStatus::Halted(_)
+        );
+        if was_running {
+            core.halt(Duration::from_millis(200))
+                .map_err(|e| format!("halt: {e}"))?;
+        }
+        let result = core
+            .read_32(address, out)
+            .map_err(|e| format!("read {} words @ {address:#010x}: {e}", out.len()));
+        if was_running {
+            let _ = core.run();
+        }
+        result
     }
 
     /// The core's current run/halt status (e.g. Running, Halted).
