@@ -1,120 +1,81 @@
 {
-  "_comment": "Example Axyr system snapshot — the data contract the dashboard and the AI agent consume. Values are real captures from a Nucleo-F401RE this session. 'status: live' = recoverable today; 'status: planned' = designed, not yet wired.",
-  "axyr_version": "0.1.0",
-  "captured_at": "2026-06-09T16:50:00Z",
+  "schema_version": "1.0",
+  "captured_at": "2026-06-09T18:30:00Z",
 
   "device": {
-    "status": "live",
     "board": "STMicroelectronics STM32F401RE-NUCLEO",
     "chip": "STM32F401RETx",
     "core": "ARM Cortex-M4F",
     "cpuid": "0x410fc241",
     "probe": "ST-LINK/V2.1",
-    "transport": "RTT (non-intrusive, no CPU halt)"
+    "transport": "RTT"
   },
 
   "state": {
-    "status": "live",
     "core": "crashed",
     "summary": "Bus fault: invalid memory access (precise)",
-    "reset_reason": "software reset (RCC CSR: SFTRSTF) | also seen: PORRSTF, PADRSTF, BORRSTF",
-    "clocks": "PLL on/locked, HSE on, SYSCLK from PLL (RCC CR/CFGR/PLLCFGR)"
+    "reset_reason": "software reset (RCC CSR: SFTRSTF)",
+    "clocks": "PLL on/locked, HSE on, SYSCLK from PLL"
   },
 
   "system_map": {
-    "status": "live (categories/kind = planned enrichment from Zephyr bindings)",
-    "source": "Zephyr devicetree (zephyr.dts)",
-    "buses": [
-      { "label": "i2c1", "alias": "arduino_i2c", "kind": "i2c", "compatible": "st,stm32-i2c-v1", "address": "0x40005400", "status": "okay", "devices": [] },
-      { "label": "i2c3", "kind": "i2c", "compatible": "st,stm32-i2c-v1", "address": "0x40005c00", "status": "okay", "devices": [] },
-      { "label": "spi1", "alias": "arduino_spi", "kind": "spi", "compatible": "st,stm32-spi", "address": "0x40013000", "status": "okay", "devices": [] }
-    ],
-    "peripherals": [
-      { "label": "usart1", "kind": "uart", "compatible": "st,stm32-usart", "address": "0x40011000", "status": "okay" },
+    "source": "zephyr devicetree",
+    "devices": [
+      { "label": "i2c1 arduino_i2c", "kind": "i2c bus", "compatible": "st,stm32-i2c-v1", "address": "0x40005400", "status": "okay", "children": [] },
+      { "label": "spi1 arduino_spi", "kind": "spi bus", "compatible": "st,stm32-spi", "address": "0x40013000", "status": "okay", "children": [] },
       { "label": "usart2", "kind": "uart", "compatible": "st,stm32-usart", "address": "0x40004400", "status": "okay" },
       { "label": "adc1", "kind": "adc", "compatible": "st,stm32f4-adc", "address": "0x40012000", "status": "okay" },
-      { "label": "timers2", "kind": "timer", "compatible": "st,stm32-timers", "address": "0x40000000", "status": "okay", "children": ["pwm2"] },
-      { "label": "rtc", "kind": "rtc", "compatible": "st,stm32-rtc", "address": "0x40002800", "status": "okay" },
-      { "label": "gpioa..gpioh", "kind": "gpio", "compatible": "st,stm32-gpio", "address": "0x40020000..0x40021c00", "status": "okay" },
-      { "label": "wwdg", "kind": "watchdog", "compatible": "st,stm32-window-watchdog", "address": "0x40002c00", "status": "okay" }
+      { "label": "die_temp", "kind": "sensor", "compatible": "st,stm32-temp-cal", "address": null, "status": "okay" },
+      { "label": "leds", "kind": "led", "compatible": "gpio-leds", "address": null, "status": "okay" },
+      { "label": "gpio_keys", "kind": "button", "compatible": "gpio-keys", "address": null, "status": "okay" }
     ],
-    "sensors": [
-      { "label": "die_temp", "kind": "sensor", "compatible": "st,stm32-temp-cal", "role": "on-die temperature" }
-    ],
-    "actuators": [
-      { "label": "leds", "kind": "led", "compatible": "gpio-leds" },
-      { "label": "pwmleds", "kind": "led", "compatible": "pwm-leds" }
-    ],
-    "inputs": [
-      { "label": "gpio_keys", "kind": "button", "compatible": "gpio-keys" }
-    ],
-    "memory_regions": [
-      { "label": "flash0", "kind": "flash", "address": "0x08000000", "size": "512 KiB" },
-      { "label": "sram0", "kind": "ram", "address": "0x20000000", "size": "96 KiB" }
-    ],
-    "disabled": ["i2c2", "spi2", "spi3", "spi4", "usart6", "timers1", "timers3", "timers4", "timers5", "iwdg", "dma1", "dma2", "sdmmc1", "usbotg_fs"]
+    "disabled": ["i2c2", "spi2", "usart6", "timers1"]
   },
 
-  "live": {
-    "telemetry": {
-      "status": "live",
-      "channel": "RTT",
-      "recent": [
-        "*** Booting Zephyr OS build v4.4.0 ***",
-        "counter=44",
-        "counter=45",
-        "counter=46",
-        "counter=47"
-      ]
-    },
-    "memory": {
-      "status": "live (registers/peripherals readable while running)",
-      "reads": [
-        { "name": "SCB CPUID", "address": "0xE000ED00", "value": "0x410fc241" },
-        { "name": "SCB ICSR", "address": "0xE000ED04", "value": "0x0400f805" }
-      ]
-    },
-    "peripherals": {
-      "status": "live (decoded via SVD, non-intrusive — read-side-effect registers skipped)",
-      "example": {
-        "name": "RCC", "address": "0x40023800",
-        "decoded": {
-          "CR": "PLLRDY=1 PLLON=1 HSEON=1 HSERDY=1 HSION=1",
-          "AHB1ENR": "GPIOA..H enabled, DMA1 enabled",
-          "APB1ENR": "USART2 enabled, PWR enabled",
-          "CSR": "reset flags: SFTRSTF/PORRSTF/PADRSTF/BORRSTF"
+  "threads": [
+    { "name": "main", "stack_used": 320, "stack_total": 1024, "stack_pct": 31, "cpu_pct": 0 },
+    { "name": "idle", "stack_used": 64, "stack_total": 320, "stack_pct": 20, "cpu_pct": 99 },
+    { "name": "thread_analyzer", "stack_used": 552, "stack_total": 1024, "stack_pct": 53, "cpu_pct": 0 }
+  ],
+
+  "timeline": [
+    { "cycles": 0, "thread": "main" },
+    { "cycles": 3984, "thread": "idle" },
+    { "cycles": 21008400, "thread": "main" },
+    { "cycles": 21012384, "thread": "idle" }
+  ],
+
+  "variables": [
+    { "name": "axyr_counter", "address": "0x200008a0", "type": "uint32", "value": 22 }
+  ],
+
+  "peripherals": [
+    {
+      "name": "RCC",
+      "address": "0x40023800",
+      "registers": [
+        {
+          "name": "CR",
+          "value": "0x03077483",
+          "fields": [
+            { "name": "PLLRDY", "value": 1, "meaning": null },
+            { "name": "PLLON", "value": 1, "meaning": null },
+            { "name": "HSEON", "value": 1, "meaning": null }
+          ]
+        },
+        {
+          "name": "APB1ENR",
+          "value": "0x10020000",
+          "fields": [
+            { "name": "USART2EN", "value": 1, "meaning": null },
+            { "name": "PWREN", "value": 1, "meaning": null }
+          ]
         }
-      },
-      "tool": "read_peripheral { name }  — e.g. GPIOA, USART2, RCC, NVIC"
-    },
-    "threads": {
-      "status": "live (Zephyr thread analyzer over RTT)",
-      "list": [
-        { "name": "main", "stack_used": 320, "stack_total": 1024, "stack_pct": 31, "cpu_pct": 0 },
-        { "name": "idle", "stack_used": 64, "stack_total": 320, "stack_pct": 20, "cpu_pct": 99 },
-        { "name": "thread_analyzer", "stack_used": 552, "stack_total": 1024, "stack_pct": 53, "cpu_pct": 0 },
-        { "name": "ISR0", "stack_used": 168, "stack_total": 2048, "stack_pct": 8, "cpu_pct": 0 }
-      ]
-    },
-    "variables": {
-      "status": "live (read by name over SWD — works while running OR sleeping, no halt)",
-      "watch": [
-        { "name": "axyr_counter", "address": "0x200008a0", "type": "uint32", "value": 22 }
-      ]
-    },
-    "timeline": {
-      "status": "live (context-switch ring buffer in RAM, read over SWD — 'what ran when')",
-      "recent_switches": [
-        { "cycles_since_first": 0, "thread": "main" },
-        { "cycles_since_first": 3984, "thread": "idle" },
-        { "cycles_since_first": 21008400, "thread": "main" },
-        { "cycles_since_first": 21012384, "thread": "idle" }
       ]
     }
-  },
+  ],
 
   "crash": {
-    "status": "live",
     "cause": "Bus fault: invalid memory access (precise)",
     "reason_code": 25,
     "fault_address": "0xbadcafe0",
@@ -124,28 +85,24 @@
       { "frame": 1, "function": "read_sensor", "file": "firmware/crash_demo/src/main.c", "line": 36 },
       { "frame": 2, "function": "main", "file": "firmware/crash_demo/src/main.c", "line": 43 }
     ],
-    "registers": {
-      "pc": "0x0800046a", "lr": "0x080004b5", "xpsr": "0x61000000",
-      "r0": "0x00000001", "r1": "0x00000000", "r2": "0x00000002", "r3": "0xbadca000", "r12": "0x00000000"
-    },
+    "registers": { "pc": "0x0800046a", "lr": "0x080004b5", "xpsr": "0x61000000", "r3": "0xbadca000" },
     "recent_telemetry": [
       "*** Booting Zephyr OS build v4.4.0 ***",
       "About to crash...",
       "<err> os: ***** BUS FAULT *****",
-      "<err> os:   Precise data bus error",
       "<err> os:   BFAR Address: 0xbadcafe0"
     ]
   },
 
-  "actions": {
-    "status": "live",
-    "transport": "MCP",
-    "available": [
-      { "name": "get_last_crash", "kind": "read" },
-      { "name": "get_system_map", "kind": "read" },
-      { "name": "read_memory", "kind": "read", "args": ["address", "count"] },
-      { "name": "reboot_board", "kind": "action" },
-      { "name": "flash_firmware", "kind": "action", "args": ["path"] }
-    ]
-  }
+  "actions": [
+    { "name": "get_last_crash", "kind": "read" },
+    { "name": "get_system_map", "kind": "read" },
+    { "name": "get_threads", "kind": "read" },
+    { "name": "get_trace", "kind": "read" },
+    { "name": "read_variable", "kind": "read", "args": ["name"] },
+    { "name": "read_peripheral", "kind": "read", "args": ["name"] },
+    { "name": "read_memory", "kind": "read", "args": ["address", "count"] },
+    { "name": "reboot_board", "kind": "action" },
+    { "name": "flash_firmware", "kind": "action", "args": ["path"] }
+  ]
 }
