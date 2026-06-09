@@ -16,8 +16,13 @@ died.
    frame (`esf`), and we emit a single structured line the host can parse:
    `AXYR_CRASH v=1 reason=… pc=… lr=… …`.
 3. With `CONFIG_DEBUG_COREDUMP=y` (see `prj.conf`), Zephyr *also* dumps a full
-   CPU + stack snapshot over serial as a `#CD:BEGIN# … #CD:END#` block. That is
-   what the host unwinds offline into the complete call stack.
+   CPU + stack snapshot as a `#CD:BEGIN# … #CD:END#` block. That is what the host
+   unwinds offline into the complete call stack.
+
+All of this is emitted over **SEGGER RTT**, not the serial port: `prj.conf`
+routes the console to RTT (`CONFIG_RTT_CONSOLE=y`, `CONFIG_UART_CONSOLE=n`) with
+synchronous logging (`CONFIG_LOG_MODE_IMMEDIATE=y`) so the fault/coredump reach
+RTT before the CPU halts. The host reads it non-intrusively over the debug probe.
 
 ## Build & flash
 
@@ -32,6 +37,7 @@ west flash
 
 ## Expected output
 
+Read over RTT (e.g. `cargo run --bin rtt_read`, or captured by `axyr-engine`).
 Zephyr prints its own fault dump first (`BUS FAULT`, registers, `BFAR`), then
 the coredump block, then our structured line:
 

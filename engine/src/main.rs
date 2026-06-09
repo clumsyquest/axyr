@@ -1,117 +1,215 @@
+//! axyr-engine — the local agent.
+//!
+//! It owns the debug probe (the single, serial SWD resource) on one background
+//! thread that drains RTT telemetry and runs board actions (see [`agent`]). The
+//! main thread is the MCP front-end (stdio, one JSON-RPC message per line): it
+//! serves read tools directly and routes action tools to the owner thread over a
+//! channel, so an agent's actions never disturb the real-time telemetry.
+
 use std::env;
 use std::fs;
-use std::io::{self, Read};
-use std::time::Duration;
+use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Sender};
+use std::thread;
 
-use axyr_engine::coredump::{CoredumpCollector, CoredumpTools, resolve_backtrace};
-use axyr_engine::recent_log::RecentLog;
-use axyr_engine::{format_report, parse_crash_line, symbolize};
+use serde_json::{Value, json};
 
-/// How many recent serial lines to keep as "what was happening just before".
-const RECENT_LOG_LINES: usize = 20;
+use axyr_engine::agent::{self, Action, Command, Config};
+use axyr_engine::coredump::CoredumpTools;
+use axyr_engine::probe::{DEFAULT_CHIP, Probe};
+use axyr_engine::system_map;
 
 fn main() {
-    // Expect: axyr-engine <serial-port> <elf> <addr2line> <crash-file>
+    // Usage: axyr-engine <elf> <addr2line> <crash-file>
     let args: Vec<String> = env::args().collect();
-    if args.len() != 5 {
-        eprintln!("usage: {} <serial-port> <elf> <addr2line> <crash-file>", args[0]);
+    if args.len() != 4 {
+        eprintln!("usage: {} <elf> <addr2line> <crash-file>", args[0]);
         std::process::exit(1);
     }
-    let port_path = args[1].as_str();
-    let elf = args[2].as_str();
-    let addr2line = args[3].as_str();
-    let crash_file = args[4].as_str();
+    let elf = args[1].clone();
+    let addr2line = args[2].clone();
+    let crash_file = args[3].clone();
 
-    // Optional: coredump tooling for full call-stack resolution. If it isn't
-    // configured (see CoredumpTools::from_env), we still produce the fast,
-    // location-only report.
-    let cd_tools = CoredumpTools::from_env(elf);
-    if cd_tools.is_none() {
+    let chip = env::var("AXYR_CHIP").unwrap_or_else(|_| DEFAULT_CHIP.to_string());
+    let dts = env::var("AXYR_DTS").ok();
+    let coredump = CoredumpTools::from_env(&elf);
+    if coredump.is_none() {
         eprintln!("note: coredump tools not configured; call stack disabled");
     }
-    let mut collector = CoredumpCollector::new();
-    // Holds the most recent backtrace; the coredump block arrives just before
-    // the AXYR_CRASH line, so it is ready by the time we build the report.
-    let mut last_backtrace: Option<String> = None;
-    // Rolling window of recent serial output, attached to the next crash report.
-    let mut recent_log = RecentLog::new(RECENT_LOG_LINES);
 
-    let mut port = serialport::new(port_path, 115200)
-        .timeout(Duration::from_millis(200))
-        .open()
-        .expect("failed to open serial port");
-    eprintln!("listening on {port_path} @ 115200 ...");
+    // The agent owns the probe; we keep only the command sender.
+    let probe = Probe::attach(&chip).unwrap_or_else(|e| {
+        eprintln!("attach to {chip}: {e}");
+        std::process::exit(1);
+    });
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
+    let cfg = Config { elf, addr2line, crash_file: crash_file.clone(), coredump };
+    thread::spawn(move || agent::run(probe, cfg, cmd_rx));
 
-    let mut chunk = [0u8; 256];
-    let mut line = String::new();
-    loop {
-        match port.read(&mut chunk) {
-            Ok(0) => {}
-            Ok(n) => {
-                for &b in &chunk[..n] {
-                    match b {
-                        b'\n' => {
-                            handle_line(
-                                line.trim(),
-                                elf,
-                                addr2line,
-                                crash_file,
-                                cd_tools.as_ref(),
-                                &mut collector,
-                                &mut last_backtrace,
-                                &mut recent_log,
-                            );
-                            line.clear();
-                        }
-                        b'\r' => {}
-                        _ => line.push(b as char),
+    serve_mcp(&crash_file, dts.as_deref(), &cmd_tx);
+}
+
+/// MCP over stdio: one JSON-RPC message per line.
+fn serve_mcp(crash_file: &str, dts: Option<&str>, cmd_tx: &Sender<Command>) {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+
+    for line in stdin.lock().lines() {
+        let line = line.expect("failed to read line");
+        if line.trim().is_empty() {
+            continue;
+        }
+        let req: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+        let id = req.get("id").cloned();
+
+        let response: Option<Value> = match method {
+            "initialize" => {
+                let version = req
+                    .pointer("/params/protocolVersion")
+                    .and_then(Value::as_str)
+                    .unwrap_or("2024-11-05");
+                Some(json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {
+                        "protocolVersion": version,
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "axyr-engine", "version": "0.1.0" }
                     }
-                }
+                }))
             }
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
-            Err(e) => { eprintln!("serial error: {e}"); break; }
+            "tools/list" => Some(json!({
+                "jsonrpc": "2.0", "id": id, "result": { "tools": tool_definitions() }
+            })),
+            "tools/call" => {
+                let tool = req.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
+                let args = req.pointer("/params/arguments").cloned().unwrap_or(json!({}));
+                let result = dispatch_tool(tool, &args, crash_file, dts, cmd_tx);
+                Some(match result {
+                    Ok(text) => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": { "content": [{ "type": "text", "text": text }] }
+                    }),
+                    Err(text) => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": { "content": [{ "type": "text", "text": text }], "isError": true }
+                    }),
+                })
+            }
+            _ => None, // notifications: no reply
+        };
+
+        if let Some(resp) = response {
+            let mut out = stdout.lock();
+            writeln!(out, "{resp}").expect("write failed");
+            out.flush().expect("flush failed");
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn handle_line(
-    line: &str,
-    elf: &str,
-    addr2line: &str,
-    crash_file: &str,
-    cd_tools: Option<&CoredumpTools>,
-    collector: &mut CoredumpCollector,
-    last_backtrace: &mut Option<String>,
-    recent_log: &mut RecentLog,
-) {
-    // Keep the rolling window of serial output up to date (the recorder skips
-    // crash machinery itself).
-    recent_log.record(line);
-
-    // Feed the coredump collector first; a full block resolves into a backtrace
-    // that we attach to the next crash report.
-    if let (Some(block), Some(tools)) = (collector.feed(line), cd_tools) {
-        match resolve_backtrace(tools, &block) {
-            Ok(bt) => *last_backtrace = Some(bt),
-            Err(e) => eprintln!("coredump: could not resolve backtrace: {e}"),
+fn tool_definitions() -> Value {
+    json!([
+        {
+            "name": "get_last_crash",
+            "description": "Return the most recent crash captured from the board (cause, source location, call stack, and recent telemetry).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "get_system_map",
+            "description": "Return the board's hardware map from the Zephyr devicetree: peripherals (I2C/SPI/UART/timers/GPIO) and the sensors/actuators on them, with addresses and on/off state.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "reboot_board",
+            "description": "Reset the target board over the debug probe and let it run.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "flash_firmware",
+            "description": "Flash an ELF image onto the target board's flash, then leave it running.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "Absolute path to the ELF file to flash." } },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "read_memory",
+            "description": "Read 32-bit words from the target's memory over SWD. Useful to inspect registers or peripherals.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "address": { "type": "string", "description": "Start address, e.g. \"0xE000ED00\" or decimal." },
+                    "count": { "type": "integer", "description": "Number of 32-bit words to read (default 1, max 256)." }
+                },
+                "required": ["address"]
+            }
         }
-    }
+    ])
+}
 
-    let Some(crash) = parse_crash_line(line) else { return; };
-    let location = symbolize(addr2line, elf, &crash.pc);
-    let mut report = format_report(&crash, &location);
-    if let Some(bt) = last_backtrace.take() {
-        report.push_str("\nCall stack:\n");
-        report.push_str(&bt);
+/// Route a tool call: reads are served here; actions go to the probe-owner
+/// thread and we block on its reply.
+fn dispatch_tool(
+    tool: &str,
+    args: &Value,
+    crash_file: &str,
+    dts: Option<&str>,
+    cmd_tx: &Sender<Command>,
+) -> Result<String, String> {
+    match tool {
+        "get_last_crash" => Ok(fs::read_to_string(crash_file)
+            .unwrap_or_else(|_| "No crash recorded yet.".to_string())),
+        "get_system_map" => {
+            let path = dts.ok_or("system map not configured (set AXYR_DTS)")?;
+            let src = fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+            system_map::render(&src).ok_or_else(|| "could not parse devicetree".to_string())
+        }
+        "reboot_board" => run_action(cmd_tx, Action::Reboot),
+        "flash_firmware" => {
+            let path = args
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("missing required argument: path")?;
+            run_action(cmd_tx, Action::Flash(PathBuf::from(path)))
+        }
+        "read_memory" => {
+            let addr_str = args
+                .get("address")
+                .and_then(Value::as_str)
+                .ok_or("missing required argument: address")?;
+            let address = parse_address(addr_str)?;
+            let count = args
+                .get("count")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                .clamp(1, 256) as usize;
+            run_action(cmd_tx, Action::ReadMemory { address, count })
+        }
+        other => Err(format!("Unknown tool: {other}")),
     }
-    if !recent_log.is_empty() {
-        report.push_str("\nRecent serial output:\n");
-        report.push_str(&recent_log.snapshot());
-    }
+}
 
-    println!("=== AXYR crash report ===\n{report}");
-    if let Err(e) = fs::write(crash_file, report.as_bytes()) {
-        eprintln!("could not write crash file: {e}");
-    }
+/// Send an action to the owner thread and wait for its result.
+fn run_action(cmd_tx: &Sender<Command>, action: Action) -> Result<String, String> {
+    let (reply, rx) = mpsc::channel();
+    cmd_tx
+        .send(Command { action, reply })
+        .map_err(|_| "agent thread is gone".to_string())?;
+    rx.recv().map_err(|_| "no reply from agent thread".to_string())?
+}
+
+/// Parse a memory address given as hex ("0x...") or decimal.
+fn parse_address(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16)
+    } else {
+        s.parse::<u64>()
+    };
+    parsed.map_err(|_| format!("invalid address: {s:?}"))
 }
