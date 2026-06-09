@@ -59,6 +59,57 @@ struct Device {
     indent: usize,
 }
 
+/// Substring → category table, most specific first (first match wins). Mapping a
+/// `compatible` to a human category lets the map read in plain words ("led",
+/// "i2c bus", "sensor"). The agent's own knowledge fills in the specifics.
+const KINDS: &[(&str, &str)] = &[
+    ("gpio-leds", "led"),
+    ("pwm-leds", "led"),
+    ("gpio-keys", "button"),
+    ("temp", "sensor"),
+    ("bme", "sensor"),
+    ("bmp", "sensor"),
+    ("accel", "sensor"),
+    ("gyro", "sensor"),
+    ("sensor", "sensor"),
+    ("i2c", "i2c bus"),
+    ("spi", "spi bus"),
+    ("usart", "uart"),
+    ("uart", "uart"),
+    ("can", "can bus"),
+    ("usb", "usb"),
+    ("otg", "usb"),
+    ("adc", "adc"),
+    ("dac", "dac"),
+    ("pwm", "pwm"),
+    ("timer", "timer"),
+    ("counter", "timer"),
+    ("rtc", "rtc"),
+    ("watchdog", "watchdog"),
+    ("wdg", "watchdog"),
+    ("gpio", "gpio"),
+    ("dma", "dma"),
+    ("flash", "flash"),
+    ("nvm", "flash"),
+    ("memory-region", "ram"),
+    ("rcc", "clock"),
+    ("clock", "clock"),
+    ("pll", "clock"),
+    ("cpu", "core"),
+    ("nvic", "core"),
+    ("systick", "core"),
+];
+
+/// A human-readable category for a `compatible`, via [`KINDS`].
+pub fn kind(compatible: &str) -> &'static str {
+    let c = compatible.to_ascii_lowercase();
+    KINDS
+        .iter()
+        .find(|(needle, _)| c.contains(needle))
+        .map(|(_, k)| *k)
+        .unwrap_or("device")
+}
+
 /// Parse a devicetree source string into its root node.
 pub fn parse(dts: &str) -> Option<Node> {
     let stripped = strip_comments(dts);
@@ -94,7 +145,12 @@ pub fn render(dts: &str) -> Option<String> {
             .address
             .map(|a| format!("  @{a:#010x}"))
             .unwrap_or_default();
-        out.push_str(&format!("{pad}{:<22}{}{addr}\n", d.label, d.compatible));
+        out.push_str(&format!(
+            "{pad}[{:<7}] {:<22}{}{addr}\n",
+            kind(&d.compatible),
+            d.label,
+            d.compatible
+        ));
     }
     if !disabled.is_empty() {
         out.push_str(&format!("\nDisabled: {}\n", disabled.join(", ")));
@@ -375,6 +431,16 @@ mod tests {
         assert_eq!(i2c1.address().unwrap(), 0x4000_5400);
         assert_eq!(i2c1.status(), "okay");
         assert!(i2c1.labels.contains(&"arduino_i2c".to_string()));
+    }
+
+    #[test]
+    fn categorizes_compatibles() {
+        assert_eq!(kind("gpio-leds"), "led");
+        assert_eq!(kind("st,stm32-i2c-v1"), "i2c bus");
+        assert_eq!(kind("st,stm32-temp-cal"), "sensor");
+        assert_eq!(kind("gpio-keys"), "button");
+        assert_eq!(kind("st,stm32-gpio"), "gpio"); // generic gpio, not a led
+        assert_eq!(kind("acme,unknown-thing"), "device");
     }
 
     #[test]
