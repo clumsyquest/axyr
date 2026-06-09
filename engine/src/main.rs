@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::time::Duration;
 
+use axyr_engine::coredump::{CoredumpCollector, CoredumpTools, resolve_backtrace};
 use axyr_engine::{format_report, parse_crash_line, symbolize};
 
 fn main() {
@@ -16,6 +17,18 @@ fn main() {
     let elf = args[2].as_str();
     let addr2line = args[3].as_str();
     let crash_file = args[4].as_str();
+
+    // Optional: coredump tooling for full call-stack resolution. If it isn't
+    // configured (see CoredumpTools::from_env), we still produce the fast,
+    // location-only report.
+    let cd_tools = CoredumpTools::from_env(elf);
+    if cd_tools.is_none() {
+        eprintln!("note: coredump tools not configured; call stack disabled");
+    }
+    let mut collector = CoredumpCollector::new();
+    // Holds the most recent backtrace; the coredump block arrives just before
+    // the AXYR_CRASH line, so it is ready by the time we build the report.
+    let mut last_backtrace: Option<String> = None;
 
     let mut port = serialport::new(port_path, 115200)
         .timeout(Duration::from_millis(200))
@@ -32,7 +45,15 @@ fn main() {
                 for &b in &chunk[..n] {
                     match b {
                         b'\n' => {
-                            handle_line(line.trim(), elf, addr2line, crash_file);
+                            handle_line(
+                                line.trim(),
+                                elf,
+                                addr2line,
+                                crash_file,
+                                cd_tools.as_ref(),
+                                &mut collector,
+                                &mut last_backtrace,
+                            );
                             line.clear();
                         }
                         b'\r' => {}
@@ -46,10 +67,33 @@ fn main() {
     }
 }
 
-fn handle_line(line: &str, elf: &str, addr2line: &str, crash_file: &str) {
+#[allow(clippy::too_many_arguments)]
+fn handle_line(
+    line: &str,
+    elf: &str,
+    addr2line: &str,
+    crash_file: &str,
+    cd_tools: Option<&CoredumpTools>,
+    collector: &mut CoredumpCollector,
+    last_backtrace: &mut Option<String>,
+) {
+    // Feed the coredump collector first; a full block resolves into a backtrace
+    // that we attach to the next crash report.
+    if let (Some(block), Some(tools)) = (collector.feed(line), cd_tools) {
+        match resolve_backtrace(tools, &block) {
+            Ok(bt) => *last_backtrace = Some(bt),
+            Err(e) => eprintln!("coredump: could not resolve backtrace: {e}"),
+        }
+    }
+
     let Some(crash) = parse_crash_line(line) else { return; };
     let location = symbolize(addr2line, elf, &crash.pc);
-    let report = format_report(&crash, &location);
+    let mut report = format_report(&crash, &location);
+    if let Some(bt) = last_backtrace.take() {
+        report.push_str("\nCall stack:\n");
+        report.push_str(&bt);
+    }
+
     println!("=== AXYR crash report ===\n{report}");
     if let Err(e) = fs::write(crash_file, report.as_bytes()) {
         eprintln!("could not write crash file: {e}");
