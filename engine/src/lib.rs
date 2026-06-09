@@ -9,6 +9,7 @@ pub mod rtt;
 pub mod symbols;
 pub mod threads;
 pub mod system_map;
+pub mod trace;
 
 /// A crash captured from the device.
 pub struct Crash {

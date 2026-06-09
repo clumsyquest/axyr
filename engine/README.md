@@ -24,13 +24,14 @@ system to AI agents over MCP — including board actions.
   firmware ELF symbol table (generic: any ELF, any variable).
 - `src/threads.rs` — parses Zephyr thread-analyzer telemetry into per-thread
   stack usage and CPU load (live RTOS state).
+- `src/trace.rs` — reconstructs the context-switch timeline from a RAM ring buffer (what ran when).
 - `src/peripheral.rs` — decodes a peripheral's live registers into plain language
   via the chip's SVD (skips side-effect/write-only registers — non-intrusive).
   Covers clocks, reset reason (RCC CSR), enabled peripherals, GPIO, NVIC, etc.
 - `src/agent.rs` — the probe-owner loop: one thread owns the probe, drains RTT
   telemetry (feeding the crash pipeline), and runs queued actions between drains.
 - `src/main.rs` — wires it together: spawns the agent thread and serves MCP over
-  stdio (`get_last_crash`, `get_system_map`, `get_threads`, `read_variable`, `read_peripheral`,
+  stdio (`get_last_crash`, `get_system_map`, `get_threads`, `get_trace`, `read_variable`, `read_peripheral`,
   `reboot_board`, `flash_firmware`, `read_memory`). Reads are served directly; actions are routed to the agent
   thread so they never disturb the real-time telemetry.
 - `src/bin/rtt_read.rs` — streams the firmware's RTT output (`rtt_read [chip]`).

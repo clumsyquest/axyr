@@ -23,6 +23,7 @@ use crate::probe::Probe;
 use crate::recent_log::RecentLog;
 use crate::rtt::Telemetry;
 use crate::threads::ThreadTable;
+use crate::trace;
 use crate::{Crash, format_report, parse_crash_line, symbolize, symbols};
 
 /// How many recent telemetry lines to keep as "what was happening just before".
@@ -39,6 +40,8 @@ pub enum Action {
     ReadPeripheral { name: String },
     /// Read a global variable live by name (resolved from the ELF).
     ReadVariable { name: String },
+    /// Read the context-switch timeline from the RAM ring buffer.
+    ReadTrace,
 }
 
 /// A request to the agent: an action plus a channel to send the result back.
@@ -232,6 +235,28 @@ fn execute(
                 }
             }
             Ok(out)
+        }
+        Action::ReadTrace => {
+            let head = symbols::resolve(elf, "axyr_trace_head")?;
+            let ring = symbols::resolve(elf, "axyr_trace")?;
+            let head_val = probe.read_word(head.address)?;
+            let mut raw = vec![0u32; trace::RING_SLOTS * 2];
+            probe.read_words(ring.address, &mut raw)?;
+            let mut entries = Vec::new();
+            for idx in trace::ordered_indices(head_val) {
+                let ts = raw[idx * 2];
+                let name_ptr = raw[idx * 2 + 1] as u64;
+                // Names live in RAM; read the string, else show the raw pointer.
+                let thread = if (0x2000_0000..0x2002_0000).contains(&name_ptr) {
+                    probe
+                        .read_cstring(name_ptr, 24)
+                        .unwrap_or_else(|_| format!("{name_ptr:#010x}"))
+                } else {
+                    format!("{name_ptr:#010x}")
+                };
+                entries.push(trace::TraceEntry { timestamp: ts, thread });
+            }
+            Ok(trace::format_timeline(&entries))
         }
     }
 }
