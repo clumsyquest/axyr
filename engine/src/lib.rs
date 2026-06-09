@@ -3,6 +3,7 @@ use std::process::Command;
 pub mod coredump;
 pub mod probe;
 pub mod recent_log;
+pub mod system_map;
 
 /// A crash captured from the device.
 pub struct Crash {
