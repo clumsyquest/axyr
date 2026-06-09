@@ -15,14 +15,15 @@ died.
    Zephyr calls our version with the fault `reason` and the exception stack
    frame (`esf`), and we emit a single structured line the host can parse:
    `AXYR_CRASH v=1 reason=… pc=… lr=… …`.
-3. With `CONFIG_DEBUG_COREDUMP=y` (see `prj.conf`), Zephyr *also* dumps a full
-   CPU + stack snapshot as a `#CD:BEGIN# … #CD:END#` block. That is what the host
-   unwinds offline into the complete call stack.
+3. With `CONFIG_DEBUG_COREDUMP=y` + the **IN_MEMORY backend** (see `prj.conf`),
+   Zephyr writes a full CPU + stack snapshot into a **RAM buffer**
+   (`in_memory_coredump`), not to a log. The host reads that buffer in one SWD
+   block (the core is halted after the fault) and unwinds it into the call stack.
 
-All of this is emitted over **SEGGER RTT**, not the serial port: `prj.conf`
-routes the console to RTT (`CONFIG_RTT_CONSOLE=y`, `CONFIG_UART_CONSOLE=n`) with
-synchronous logging (`CONFIG_LOG_MODE_IMMEDIATE=y`) so the fault/coredump reach
-RTT before the CPU halts. The host reads it non-intrusively over the debug probe.
+The `AXYR_CRASH` packet + the fault dump go over **SEGGER RTT** (console routed
+to RTT, UART off, `CONFIG_LOG_MODE_IMMEDIATE` so they flush before the halt). The
+bulky coredump does NOT stream over RTT — it stays in RAM and is read directly,
+which is what makes capture fast (~3s, vs tens of seconds when streamed via logs).
 
 ## Build & flash
 

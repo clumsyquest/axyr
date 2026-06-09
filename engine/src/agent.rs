@@ -7,30 +7,31 @@
 //! action only pauses the host's draining for the action's duration — no
 //! telemetry is lost and the target's real-time behaviour is never disturbed.
 //!
-//! Callers (e.g. the MCP front-end) never touch the probe: they send an
-//! [`Action`] over a channel and await the reply.
+//! On a crash, the coredump is NOT streamed over RTT (slow): the firmware's
+//! IN_MEMORY backend leaves it in a RAM buffer, and the agent reads that buffer
+//! in one SWD block (the core is halted after the fault) — fast and log-free.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-use crate::coredump::{CoredumpCollector, CoredumpTools, resolve_backtrace};
+use crate::coredump::{CoredumpTools, resolve_backtrace_from_bin};
 use crate::probe::Probe;
 use crate::recent_log::RecentLog;
 use crate::rtt::Telemetry;
-use crate::{format_report, parse_crash_line, symbolize};
+use crate::symbols;
+use crate::{Crash, format_report, parse_crash_line, symbolize};
 
 /// How many recent telemetry lines to keep as "what was happening just before".
 const RECENT_LOG_LINES: usize = 20;
+/// Zephyr's IN_MEMORY coredump backend buffer symbol.
+const COREDUMP_SYMBOL: &str = "in_memory_coredump";
 
 /// An action the agent performs on the board, via the owned probe.
 pub enum Action {
-    /// Reset the target and let it run.
     Reboot,
-    /// Flash an ELF image, then leave the board running.
     Flash(PathBuf),
-    /// Read `count` 32-bit words starting at `address`.
     ReadMemory { address: u64, count: usize },
 }
 
@@ -48,9 +49,14 @@ pub struct Config {
     pub coredump: Option<CoredumpTools>,
 }
 
-/// Run the probe-owner loop forever: drain RTT, run queued commands. Consumes
-/// the probe (this thread is its sole owner).
+/// Run the probe-owner loop forever: drain RTT, capture crashes, run commands.
 pub fn run(mut probe: Probe, cfg: Config, commands: Receiver<Command>) {
+    // Where the IN_MEMORY coredump buffer lives in RAM (resolved from the ELF).
+    let coredump_addr = symbols::resolve(&cfg.elf, COREDUMP_SYMBOL)
+        .map(|s| s.address)
+        .map_err(|e| eprintln!("agent: no coredump buffer symbol ({e}); call stack disabled"))
+        .ok();
+
     // The RTT scan needs an awake window; retry until the control block is found.
     let mut telemetry = loop {
         match Telemetry::attach(probe.session_mut()) {
@@ -63,23 +69,23 @@ pub fn run(mut probe: Probe, cfg: Config, commands: Receiver<Command>) {
     };
     eprintln!("agent: RTT attached; streaming telemetry (no halt)");
 
-    let mut collector = CoredumpCollector::new();
     let mut recent_log = RecentLog::new(RECENT_LOG_LINES);
-    let mut last_backtrace: Option<String> = None;
     let mut line = String::new();
     let mut buf = [0u8; 1024];
 
     loop {
-        // 1. Drain telemetry fully this cycle (keep reading until the buffer is
-        //    empty) so a burst — e.g. a coredump — is pulled at probe speed
-        //    instead of one chunk per sleep.
+        // 1. Drain telemetry fully this cycle. A crash is signalled by the
+        //    AXYR_CRASH line; the heavy work happens after the drain.
+        let mut crash: Option<Crash> = None;
         loop {
             match telemetry.read(probe.session_mut(), &mut buf) {
                 Ok(n) if n > 0 => {
                     for &b in &buf[..n] {
                         match b {
                             b'\n' => {
-                                handle_line(line.trim(), &cfg, &mut collector, &mut recent_log, &mut last_backtrace);
+                                if let Some(c) = process_line(line.trim(), &mut recent_log) {
+                                    crash = Some(c);
+                                }
                                 line.clear();
                             }
                             b'\r' => {}
@@ -91,7 +97,12 @@ pub fn run(mut probe: Probe, cfg: Config, commands: Receiver<Command>) {
             }
         }
 
-        // 2. Run any queued actions, interleaved between drains. RTT keeps
+        // 2. On a crash, read the coredump from RAM over SWD and write the report.
+        if let Some(crash) = crash {
+            report_crash(&mut probe, &cfg, coredump_addr, &crash, &recent_log);
+        }
+
+        // 3. Run any queued actions, interleaved between drains. RTT keeps
         //    buffering on the target while we do, so nothing is lost.
         while let Ok(cmd) = commands.try_recv() {
             let result = execute(&mut probe, cmd.action);
@@ -99,6 +110,50 @@ pub fn run(mut probe: Probe, cfg: Config, commands: Receiver<Command>) {
         }
 
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Record a telemetry line and, if it is the crash packet, return the parsed crash.
+fn process_line(line: &str, recent_log: &mut RecentLog) -> Option<Crash> {
+    recent_log.record(line);
+    parse_crash_line(line)
+}
+
+/// Build and write the crash report: decode cause + location, read the coredump
+/// from RAM over SWD and unwind it, and attach the recent telemetry.
+fn report_crash(
+    probe: &mut Probe,
+    cfg: &Config,
+    coredump_addr: Option<u64>,
+    crash: &Crash,
+    recent_log: &RecentLog,
+) {
+    let location = symbolize(&cfg.addr2line, &cfg.elf, &crash.pc);
+    let mut report = format_report(crash, &location);
+
+    // Read the in-memory coredump (core is halted after the fault) and unwind it.
+    if let (Some(addr), Some(tools)) = (coredump_addr, cfg.coredump.as_ref()) {
+        match probe.read_in_memory_coredump(addr) {
+            Ok(Some(dump)) => match resolve_backtrace_from_bin(tools, &dump) {
+                Ok(bt) => {
+                    report.push_str("\nCall stack:\n");
+                    report.push_str(&bt);
+                }
+                Err(e) => eprintln!("agent: backtrace: {e}"),
+            },
+            Ok(None) => eprintln!("agent: no valid coredump in RAM"),
+            Err(e) => eprintln!("agent: read coredump: {e}"),
+        }
+    }
+
+    if !recent_log.is_empty() {
+        report.push_str("\nRecent telemetry:\n");
+        report.push_str(&recent_log.snapshot());
+    }
+
+    println!("=== AXYR crash report ===\n{report}");
+    if let Err(e) = std::fs::write(&cfg.crash_file, report.as_bytes()) {
+        eprintln!("agent: could not write crash file: {e}");
     }
 }
 
@@ -122,41 +177,5 @@ fn execute(probe: &mut Probe, action: Action) -> Result<String, String> {
             }
             Ok(out.trim_end().to_string())
         }
-    }
-}
-
-/// Process one telemetry line through the crash pipeline (same logic as the old
-/// serial listener, now fed from RTT).
-fn handle_line(
-    line: &str,
-    cfg: &Config,
-    collector: &mut CoredumpCollector,
-    recent_log: &mut RecentLog,
-    last_backtrace: &mut Option<String>,
-) {
-    recent_log.record(line);
-
-    if let (Some(block), Some(tools)) = (collector.feed(line), cfg.coredump.as_ref()) {
-        match resolve_backtrace(tools, &block) {
-            Ok(bt) => *last_backtrace = Some(bt),
-            Err(e) => eprintln!("agent: could not resolve backtrace: {e}"),
-        }
-    }
-
-    let Some(crash) = parse_crash_line(line) else { return; };
-    let location = symbolize(&cfg.addr2line, &cfg.elf, &crash.pc);
-    let mut report = format_report(&crash, &location);
-    if let Some(bt) = last_backtrace.take() {
-        report.push_str("\nCall stack:\n");
-        report.push_str(&bt);
-    }
-    if !recent_log.is_empty() {
-        report.push_str("\nRecent telemetry:\n");
-        report.push_str(&recent_log.snapshot());
-    }
-
-    println!("=== AXYR crash report ===\n{report}");
-    if let Err(e) = std::fs::write(&cfg.crash_file, report.as_bytes()) {
-        eprintln!("agent: could not write crash file: {e}");
     }
 }

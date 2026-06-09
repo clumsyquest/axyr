@@ -57,6 +57,38 @@ impl Probe {
             .map_err(|e| format!("read {} words @ {address:#010x}: {e}", out.len()))
     }
 
+    /// Read a Zephyr in-memory coredump straight from the target's RAM buffer.
+    ///
+    /// The IN_MEMORY backend lays the buffer out as
+    /// `[canary 4B][size u32][raw coredump ...][canary]`, so we read the whole
+    /// dump in one block over SWD (the core is halted after a fault, so SRAM
+    /// reads work) — no log subsystem, no hex, no streaming. `base` is the
+    /// address of the `in_memory_coredump` symbol. Returns `None` if the canary
+    /// shows no valid dump.
+    pub fn read_in_memory_coredump(&mut self, base: u64) -> Result<Option<Vec<u8>>, String> {
+        const CANARY: [u8; 4] = [0xDE, 0xB0, 0xDE, 0xB0];
+        let mut core = self.session.core(0).map_err(|e| format!("core: {e}"))?;
+
+        let mut canary = [0u8; 4];
+        core.read(base, &mut canary)
+            .map_err(|e| format!("read coredump canary: {e}"))?;
+        if canary != CANARY {
+            return Ok(None); // no valid dump stored
+        }
+
+        let size = core
+            .read_word_32(base + 4)
+            .map_err(|e| format!("read coredump size: {e}"))? as usize;
+        if size == 0 || size > 256 * 1024 {
+            return Ok(None); // implausible size
+        }
+
+        let mut data = vec![0u8; size];
+        core.read(base + 8, &mut data)
+            .map_err(|e| format!("read coredump data: {e}"))?;
+        Ok(Some(data))
+    }
+
     /// The core's current run/halt status (e.g. Running, Halted).
     pub fn status(&mut self) -> Result<String, String> {
         let mut core = self.session.core(0).map_err(|e| format!("core: {e}"))?;
