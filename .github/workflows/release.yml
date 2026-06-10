@@ -25,7 +25,9 @@ jobs:
           # ubuntu-22.04: oldest supported glibc, so the binary runs on more distros.
           - { target: x86_64-unknown-linux-gnu, runner: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-22.04-arm }
-          - { target: x86_64-apple-darwin, runner: macos-13 }
+          # Intel macOS is cross-compiled from the ARM runner: GitHub is
+          # retiring macos-13 (Intel) runners and queues there never drain.
+          - { target: x86_64-apple-darwin, runner: macos-15 }
           - { target: aarch64-apple-darwin, runner: macos-14 }
           - { target: x86_64-pc-windows-msvc, runner: windows-latest }
     steps:
@@ -37,23 +39,23 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install Rust (stable)
-        run: rustup update stable && rustup default stable
+        run: rustup update stable && rustup default stable && rustup target add ${{ matrix.target }}
 
       - name: Build
         working-directory: engine
-        run: cargo build --release --locked --bin axyr
+        run: cargo build --release --locked --bin axyr --target ${{ matrix.target }}
 
       - name: Package (tar.gz)
         if: runner.os != 'Windows'
         run: |
           mkdir dist
-          cp engine/target/release/axyr dist/
+          cp "engine/target/${{ matrix.target }}/release/axyr" dist/
           tar -C dist -czf "axyr-${{ matrix.target }}.tar.gz" axyr
 
       - name: Package (zip)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path engine/target/release/axyr.exe -DestinationPath "axyr-${{ matrix.target }}.zip"
+        run: Compress-Archive -Path "engine/target/${{ matrix.target }}/release/axyr.exe" -DestinationPath "axyr-${{ matrix.target }}.zip"
 
       - uses: actions/upload-artifact@v4
         with:
