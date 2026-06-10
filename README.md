@@ -13,8 +13,11 @@ curl -fsSL https://raw.githubusercontent.com/clumsyquest/axyr/main/install.sh | 
 
 Linux (x86_64 / aarch64) and macOS (Intel / Apple Silicon). The script downloads
 the latest [release](https://github.com/clumsyquest/axyr/releases), verifies its
-checksum, and installs `axyr` to `~/.local/bin` — no sudo. Then, from your
-Zephyr project, with the board plugged in:
+checksum, and installs `axyr` to `~/.local/bin` — no sudo. On Windows, download
+`axyr-x86_64-pc-windows-msvc.zip` from the
+[releases page](https://github.com/clumsyquest/axyr/releases) (or use WSL; the
+board's ST-LINK needs the usual ST USB driver). Then, from your Zephyr project,
+with the board plugged in:
 
 ```bash
 axyr

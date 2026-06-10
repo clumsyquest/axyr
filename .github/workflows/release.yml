@@ -27,6 +27,7 @@ jobs:
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-22.04-arm }
           - { target: x86_64-apple-darwin, runner: macos-13 }
           - { target: aarch64-apple-darwin, runner: macos-14 }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest }
     steps:
       - uses: actions/checkout@v4
 
@@ -42,16 +43,24 @@ jobs:
         working-directory: engine
         run: cargo build --release --locked --bin axyr
 
-      - name: Package
+      - name: Package (tar.gz)
+        if: runner.os != 'Windows'
         run: |
           mkdir dist
           cp engine/target/release/axyr dist/
           tar -C dist -czf "axyr-${{ matrix.target }}.tar.gz" axyr
 
+      - name: Package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path engine/target/release/axyr.exe -DestinationPath "axyr-${{ matrix.target }}.zip"
+
       - uses: actions/upload-artifact@v4
         with:
           name: axyr-${{ matrix.target }}
-          path: axyr-*.tar.gz
+          path: |
+            axyr-*.tar.gz
+            axyr-*.zip
           if-no-files-found: error
 
   publish:
@@ -67,7 +76,7 @@ jobs:
 
       - name: Checksums
         working-directory: dist
-        run: sha256sum axyr-*.tar.gz > SHA256SUMS
+        run: sha256sum axyr-* > SHA256SUMS
 
       - name: Create release
         env:
