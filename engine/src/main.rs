@@ -32,6 +32,26 @@ use axyr_engine::system_map;
 fn main() {
     let args: Vec<String> = env::args().collect();
 
+    match args.get(1).map(String::as_str) {
+        Some("--version" | "-V") => {
+            println!("axyr {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Some("--help" | "-h") => {
+            println!("axyr {} — the local agent: plugs your board into the dashboard and MCP", env!("CARGO_PKG_VERSION"));
+            println!();
+            println!("usage: axyr [build-dir|firmware.elf] [crash-file]");
+            println!();
+            println!("  run it from your project: it finds build/zephyr/zephyr.elf, attaches to");
+            println!("  the board over the debug probe (chip auto-detected), serves the dashboard");
+            println!("  API on 127.0.0.1:7878 and MCP on stdio.");
+            println!();
+            println!("environment: AXYR_CHIP, AXYR_DTS, AXYR_SVD, AXYR_HTTP, AXYR_WATCH (see README)");
+            return;
+        }
+        _ => {}
+    }
+
     // Zero-config: auto-detect the firmware build. argv[1] may be an explicit
     // ELF, a project/build directory, or absent (search the cwd). This is what
     // makes `axyr` "plug in and go" — no env vars to set.
