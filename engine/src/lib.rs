@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod chip;
 pub mod coredump;
 pub mod diff;
 pub mod health;

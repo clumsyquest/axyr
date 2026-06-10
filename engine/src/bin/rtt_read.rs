@@ -1,18 +1,20 @@
 //! Smoke test for the RTT telemetry reader: stream the firmware's RTT output
 //! to stdout, non-intrusively (the core is never halted).
 //!
-//!   rtt_read [chip]   (defaults to the Nucleo-F401RE)
+//!   rtt_read [chip]   (auto-detects the target when omitted)
 
 use std::io::{self, Write};
 use std::{thread, time::Duration};
 
-use axyr_engine::probe::{DEFAULT_CHIP, Probe};
+use axyr_engine::probe::Probe;
 use axyr_engine::rtt::Telemetry;
 
 fn main() {
-    let chip = std::env::args().nth(1).unwrap_or_else(|| DEFAULT_CHIP.to_string());
-
-    let mut probe = Probe::attach(&chip).unwrap_or_else(|e| {
+    let mut probe = match std::env::args().nth(1) {
+        Some(chip) => Probe::attach(&chip),
+        None => Probe::attach_auto(None).map(|(p, _)| p),
+    }
+    .unwrap_or_else(|e| {
         eprintln!("attach: {e}");
         std::process::exit(1);
     });
