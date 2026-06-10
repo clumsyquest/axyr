@@ -22,9 +22,8 @@ use serde_json::{Value, json};
 
 use crate::coredump::{CoredumpTools, resolve_backtrace_from_bin};
 use crate::unwind;
-use crate::probe::Probe;
+use crate::link::ProbeLink;
 use crate::recent_log::RecentLog;
-use crate::rtt::Telemetry;
 use crate::threads::ThreadTable;
 use crate::trace;
 use crate::{
@@ -90,8 +89,11 @@ pub struct Config {
 
 /// Run the probe-owner loop forever: drain RTT, capture crashes, run commands.
 /// `threads` is shared with the MCP front-end so `get_threads` can read it.
+///
+/// `link` is the only way this loop touches the board — local probe or a
+/// remote agent over the wire, the analysis is identical.
 pub fn run(
-    mut probe: Probe,
+    mut link: Box<dyn ProbeLink>,
     cfg: Config,
     commands: Receiver<Command>,
     threads: Arc<Mutex<ThreadTable>>,
@@ -109,80 +111,40 @@ pub fn run(
             .ok()
     });
 
-    // The RTT scan needs an awake window; retry until the control block is found.
-    let mut telemetry = loop {
-        match Telemetry::attach(probe.session_mut()) {
-            Ok(t) => break t,
-            Err(e) => {
-                eprintln!("agent: attach RTT: {e}; retrying...");
-                thread::sleep(Duration::from_millis(300));
-            }
-        }
-    };
-    eprintln!("agent: RTT attached; streaming telemetry (no halt)");
-
     let mut recent_log = RecentLog::new(RECENT_LOG_LINES);
     let mut last_crash: Option<Value> = None;
     let mut last_snapshot: Option<Value> = None;
-    let mut link_errors = 0u32;
     // History: a rolling time-series of system state, for the dashboard to
     // animate ("the system over time", not just one frame).
     let mut history: VecDeque<Value> = VecDeque::new();
     let record_start = Instant::now();
     let mut last_record = record_start;
     let mut line = String::new();
-    let mut buf = [0u8; 1024];
+    let mut chunk: Vec<u8> = Vec::new();
 
     loop {
         // 1. Drain telemetry fully this cycle. A crash is signalled by the
-        //    AXYR_CRASH line; the heavy work happens after the drain.
+        //    AXYR_CRASH line; the heavy work happens after the drain. Errors
+        //    are transient (the link self-heals internally) — skip the cycle.
+        chunk.clear();
         let mut crash: Option<Crash> = None;
-        let mut read_failed = false;
-        loop {
-            match telemetry.read(probe.session_mut(), &mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    for &b in &buf[..n] {
-                        match b {
-                            b'\n' => {
-                                if let Some(c) = process_line(line.trim(), &mut recent_log, &threads) {
-                                    crash = Some(c);
-                                }
-                                line.clear();
-                            }
-                            b'\r' => {}
-                            _ => line.push(b as char),
-                        }
+        let _ = link.poll_telemetry(&mut chunk);
+        for &b in &chunk {
+            match b {
+                b'\n' => {
+                    if let Some(c) = process_line(line.trim(), &mut recent_log, &threads) {
+                        crash = Some(c);
                     }
+                    line.clear();
                 }
-                Err(_) => {
-                    read_failed = true;
-                    break;
-                }
+                b'\r' => {}
+                _ => line.push(b as char),
             }
-        }
-
-        // Self-heal a wedged SWD link: after a few failed cycles, re-open the
-        // probe and re-attach RTT — no human needed.
-        if read_failed {
-            link_errors += 1;
-            if link_errors >= 3 {
-                eprintln!("agent: SWD link errors — reattaching...");
-                if probe.reattach().is_ok()
-                    && let Ok(t) = Telemetry::attach(probe.session_mut())
-                {
-                    telemetry = t;
-                    eprintln!("agent: link recovered");
-                }
-                link_errors = 0;
-            }
-        } else {
-            link_errors = 0;
         }
 
         // 2. On a crash, read the coredump from RAM over SWD and write the report.
         if let Some(crash) = crash {
-            last_crash = report_crash(&mut probe, &cfg, coredump_addr, &crash, &recent_log);
+            last_crash = report_crash(link.as_mut(), &cfg, coredump_addr, &crash, &recent_log);
         }
 
         // 3. Run any queued actions, interleaved between drains. RTT keeps
@@ -195,7 +157,7 @@ pub fn run(
             let resets_target = matches!(cmd.action, Action::Reboot | Action::Flash(_));
             let result = match cmd.action {
                 Action::GetSnapshot => {
-                    match build_snapshot(&mut probe, &cfg, svd.as_ref(), &threads, last_crash.as_ref()) {
+                    match build_snapshot(link.as_mut(), &cfg, svd.as_ref(), &threads, last_crash.as_ref()) {
                         Ok(v) => {
                             let text = serde_json::to_string_pretty(&v)
                                 .map_err(|e| format!("serialize snapshot: {e}"));
@@ -206,7 +168,7 @@ pub fn run(
                     }
                 }
                 Action::DiffSnapshot => {
-                    match build_snapshot(&mut probe, &cfg, svd.as_ref(), &threads, last_crash.as_ref()) {
+                    match build_snapshot(link.as_mut(), &cfg, svd.as_ref(), &threads, last_crash.as_ref()) {
                         Ok(v) => {
                             let text = match &last_snapshot {
                                 Some(prev) => diff::diff(prev, &v),
@@ -219,21 +181,16 @@ pub fn run(
                     }
                 }
                 Action::GetHealth => {
-                    build_health(&mut probe, svd.as_ref(), &threads, last_crash.as_ref())
+                    build_health(link.as_mut(), svd.as_ref(), &threads, last_crash.as_ref())
                 }
                 Action::GetHistory => {
                     serde_json::to_string_pretty(&Value::Array(history.iter().cloned().collect()))
                         .map_err(|e| format!("serialize history: {e}"))
                 }
-                other => execute(&mut probe, other, svd.as_ref(), &cfg.elf),
+                other => execute(link.as_mut(), other, svd.as_ref(), &cfg.elf),
             };
             if resets_target && result.is_ok() {
-                // Let the firmware re-init RTT, then re-attach to re-sync buffers.
-                thread::sleep(Duration::from_millis(50));
-                match Telemetry::attach(probe.session_mut()) {
-                    Ok(t) => telemetry = t,
-                    Err(e) => eprintln!("agent: RTT re-attach after reset failed: {e}"),
-                }
+                link.resync_telemetry();
             }
             let _ = cmd.reply.send(result);
         }
@@ -241,7 +198,7 @@ pub fn run(
         // Record a history tick at the configured cadence.
         if last_record.elapsed() >= RECORD_INTERVAL {
             let t_ms = record_start.elapsed().as_millis() as u64;
-            let tick = capture_tick(&mut probe, &cfg, &threads, t_ms);
+            let tick = capture_tick(link.as_mut(), &cfg, &threads, t_ms);
             if history.len() >= HISTORY_TICKS {
                 history.pop_front();
             }
@@ -270,7 +227,7 @@ fn process_line(
 /// Build and write the crash report: decode cause + location, read the coredump
 /// from RAM over SWD and unwind it, and attach the recent telemetry.
 fn report_crash(
-    probe: &mut Probe,
+    probe: &mut dyn ProbeLink,
     cfg: &Config,
     coredump_addr: Option<u64>,
     crash: &Crash,
@@ -285,7 +242,7 @@ fn report_crash(
     // is used only as a fallback when it's configured and the native path fails.
     let mut backtrace: Option<String> = None;
     if let Some(addr) = coredump_addr {
-        match probe.read_in_memory_coredump(addr) {
+        match probe.read_coredump(addr) {
             Ok(Some(dump)) => {
                 backtrace = native_backtrace(probe, &cfg.elf, &dump)
                     .or_else(|| gdb_backtrace(cfg.coredump.as_ref(), &dump));
@@ -325,7 +282,7 @@ fn report_crash(
 /// Native backtrace: parse registers from the coredump, then unwind via DWARF
 /// CFI, reading stack words over SWD (the core is halted after the fault). No
 /// external toolchain. Returns `None` (with a note) if it can't produce frames.
-fn native_backtrace(probe: &mut Probe, elf: &str, dump: &[u8]) -> Option<String> {
+fn native_backtrace(probe: &mut dyn ProbeLink, elf: &str, dump: &[u8]) -> Option<String> {
     let regs = unwind::parse_registers(dump)
         .map_err(|e| eprintln!("agent: native unwind (registers): {e}"))
         .ok()?;
@@ -379,7 +336,7 @@ fn fault_address(telemetry: &str) -> Option<String> {
 /// the context-switch timeline, watched variables, decoded peripherals, and the
 /// last crash post-mortem.
 fn build_snapshot(
-    probe: &mut Probe,
+    probe: &mut dyn ProbeLink,
     cfg: &Config,
     svd: Option<&svd_parser::svd::Device>,
     threads: &Arc<Mutex<ThreadTable>>,
@@ -464,7 +421,7 @@ fn build_snapshot(
 /// enough to record every second (threads + watched variables + core state);
 /// the dashboard replays these to animate the system over time.
 fn capture_tick(
-    probe: &mut Probe,
+    probe: &mut dyn ProbeLink,
     cfg: &Config,
     threads: &Arc<Mutex<ThreadTable>>,
     t_ms: u64,
@@ -482,7 +439,7 @@ fn capture_tick(
 
 /// Run proactive health checks over the captured state.
 fn build_health(
-    probe: &mut Probe,
+    probe: &mut dyn ProbeLink,
     svd: Option<&svd_parser::svd::Device>,
     threads: &Arc<Mutex<ThreadTable>>,
     last_crash: Option<&Value>,
@@ -497,7 +454,7 @@ fn build_health(
 }
 
 /// The reset reason from RCC CSR (the set `*RSTF` flags), via the SVD.
-fn reset_reason(probe: &mut Probe, svd: Option<&svd_parser::svd::Device>) -> Option<String> {
+fn reset_reason(probe: &mut dyn ProbeLink, svd: Option<&svd_parser::svd::Device>) -> Option<String> {
     let device = svd?;
     let regs = peripheral::read_state(device, "RCC", |a| probe.read_word(a)).ok()?;
     let csr = regs.iter().find(|r| r.name == "CSR")?;
@@ -512,7 +469,7 @@ fn reset_reason(probe: &mut Probe, svd: Option<&svd_parser::svd::Device>) -> Opt
 }
 
 /// Read the context-switch timeline as JSON `[{cycles, thread}]`, oldest first.
-fn read_timeline(probe: &mut Probe, elf: &str) -> Option<Value> {
+fn read_timeline(probe: &mut dyn ProbeLink, elf: &str) -> Option<Value> {
     let head = symbols::resolve(elf, "axyr_trace_head").ok()?;
     let ring = symbols::resolve(elf, "axyr_trace").ok()?;
     let head_val = probe.read_word(head.address).ok()?;
@@ -535,7 +492,7 @@ fn read_timeline(probe: &mut Probe, elf: &str) -> Option<Value> {
 }
 
 /// Read the configured watch list as JSON `[{name, address, value}]`.
-fn read_watch(probe: &mut Probe, elf: &str, watch: &[String]) -> Value {
+fn read_watch(probe: &mut dyn ProbeLink, elf: &str, watch: &[String]) -> Value {
     let mut arr = Vec::new();
     for name in watch {
         if let Ok(sym) = symbols::resolve(elf, name)
@@ -570,7 +527,7 @@ fn actions_json() -> Value {
 
 /// Execute one action on the owned probe.
 fn execute(
-    probe: &mut Probe,
+    probe: &mut dyn ProbeLink,
     action: Action,
     svd: Option<&svd_parser::svd::Device>,
     elf: &str,
@@ -581,7 +538,8 @@ fn execute(
             Ok("Board reset and running.".to_string())
         }
         Action::Flash(path) => {
-            probe.flash_elf(&path)?;
+            let image = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            probe.flash(&image)?;
             Ok(format!("Flashed {}; board running.", path.display()))
         }
         Action::ReadMemory { address, count } => {

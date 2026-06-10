@@ -1,6 +1,11 @@
 pub mod agent;
+pub mod api;
 pub mod chip;
 pub mod coredump;
+pub mod link;
+pub mod relay;
+pub mod remote;
+pub mod wire;
 pub mod diff;
 pub mod health;
 pub mod peripheral;

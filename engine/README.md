@@ -55,9 +55,22 @@ cargo test
 
 ## Run
 
+Two modes, same analysis:
+
 ```bash
-axyr-engine <elf> <crash-file>
+# All-local: one process owns the probe AND runs the engine (API + MCP).
+axyr [build-dir|firmware.elf]
+
+# Split: a dumb agent relays the probe to an engine running elsewhere
+# (LAN or cloud). The agent holds no analysis — ELF/DWARF/devicetree/SVD
+# all run engine-side; artifacts are uploaded at connect.
+axyr-engined                                  # on the engine host
+axyr --connect ws://engine-host:7879          # next to the board
 ```
+
+`axyr-engined` listens on `AXYR_HTTP` (or `PORT`, Railway-style) for the
+dashboard and `AXYR_AGENT_LISTEN` (or `AGENT_PORT`) for agents; it survives
+agent reconnects (each reconnect is a fresh session).
 
 Example:
 
