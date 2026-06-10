@@ -62,7 +62,9 @@ axyr-engine <elf> <crash-file>
 Example:
 
 ```bash
-export AXYR_CHIP=STM32F401RETx            # target chip (default)
+export AXYR_CHIP=STM32F401RETx            # optional — the chip is auto-detected
+                                          # (firmware build's CONFIG_SOC, then the
+                                          # silicon itself); set this to override
 export AXYR_DTS=~/zephyrproject/zephyr/build/zephyr/zephyr.dts   # for get_system_map
 export AXYR_SVD=~/STMicroelectronics/.../SVD/STM32F401.svd       # for read_peripheral
 # coredump tooling, to resolve the full call stack:

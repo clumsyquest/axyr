@@ -12,9 +12,12 @@ use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
 
+use probe_rs::config::{Registry, TargetSelector};
 use probe_rs::flashing::{Format, download_file};
 use probe_rs::probe::list::Lister;
 use probe_rs::{MemoryInterface, Permissions, Session};
+
+use crate::chip;
 
 /// Retry a probe operation a few times on transient SWD errors. Commodity
 /// ST-LINK clones occasionally throw a spurious "ARM specific error" under load;
@@ -33,8 +36,17 @@ fn with_retry<T>(mut op: impl FnMut() -> Result<T, String>) -> Result<T, String>
     Err(last)
 }
 
-/// The chip on the Nucleo-F401RE. Will become configurable as we add targets.
-pub const DEFAULT_CHIP: &str = "STM32F401RETx";
+/// How [`Probe::attach_auto`] identified the chip — shown on the Connect
+/// screen and in the startup banner, so detection is never a silent guess.
+pub struct Detection {
+    /// The probe-rs target we attached to (e.g. `STM32F401RE`).
+    pub chip: String,
+    /// Human-readable source of the decision (build, silicon, fallback…).
+    pub method: String,
+    /// `true` when we fell back to a generic Cortex-M target: observation
+    /// works, but flashing needs the real chip (`AXYR_CHIP`).
+    pub generic: bool,
+}
 
 /// A live connection to the target over the first available debug probe.
 pub struct Probe {
@@ -55,27 +67,119 @@ impl Probe {
 
     /// Read the chip identity straight from silicon: the Cortex-M CPUID and, on
     /// STM32, the DBGMCU IDCODE (its low 12 bits are the device id, e.g. 0x433
-    /// for the STM32F401). Either is `None` if the read isn't supported.
+    /// for the STM32F401). The IDCODE address varies per STM32 family, so this
+    /// sweeps the known locations and keeps the first one holding a device id
+    /// we recognize. Either is `None` if the read isn't supported.
     pub fn identity(&mut self) -> (Option<u32>, Option<u32>) {
         let cpuid = self.read_word(0xE000_ED00).ok();
-        let idcode = self.read_word(0xE004_2000).ok();
+        let idcode = chip::ST_DBGMCU_ADDRS
+            .iter()
+            .filter_map(|&a| self.read_word_once(a).ok())
+            .find(|&v| chip::known_st_devid(v));
         (cpuid, idcode)
+    }
+
+    /// The probe-rs target name this session is attached to.
+    pub fn chip(&self) -> &str {
+        &self.chip
     }
 
     /// Attach to the first probe and the given chip **without resetting or
     /// halting** the core, so we observe the system as it actually runs.
     pub fn attach(chip: &str) -> Result<Self, String> {
-        let lister = Lister::new();
-        let info = lister
+        Self::attach_selector(chip.into())
+    }
+
+    fn attach_selector(target: TargetSelector) -> Result<Self, String> {
+        let label = match &target {
+            TargetSelector::Unspecified(name) => name.clone(),
+            _ => "auto-detected chip".to_string(),
+        };
+        let info = Lister::new()
             .list_all()
             .into_iter()
             .next()
             .ok_or("no debug probe found")?;
         let probe = info.open().map_err(|e| format!("open probe: {e}"))?;
         let session = probe
-            .attach(chip, Permissions::default())
-            .map_err(|e| format!("attach to {chip}: {e}"))?;
-        Ok(Self { session, chip: chip.to_string() })
+            .attach(target, Permissions::default())
+            .map_err(|e| format!("attach to {label}: {e}"))?;
+        // Keep the registry's canonical name (what Auto resolved to).
+        let chip = session.target().name.clone();
+        Ok(Self { session, chip })
+    }
+
+    /// Attach without being told the chip — the layered auto-detection that
+    /// makes `axyr` work on whatever board is plugged in:
+    ///
+    /// 1. the firmware build's `CONFIG_SOC` (exact, instant, cross-vendor);
+    /// 2. probe-rs's silicon auto-detect (Nordic, Espressif, Infineon, …);
+    /// 3. our ST detection: attach a generic Cortex-M, read the DBGMCU device
+    ///    id, re-attach the precise target (probe-rs can't auto-detect ST);
+    /// 4. stay on the generic target — observation only, but never a dead end.
+    ///
+    /// Every layer is non-intrusive: no reset, no halt, only debug-port reads.
+    pub fn attach_auto(soc: Option<&str>) -> Result<(Self, Detection), String> {
+        let registry = Registry::from_builtin_families();
+
+        // 1) The firmware build names the SoC it was compiled for.
+        if let Some(soc) = soc {
+            if let Some(name) = chip::resolve_soc(&registry, soc) {
+                match Self::attach(&name) {
+                    Ok(p) => {
+                        let chip = p.chip.clone();
+                        return Ok((p, Detection {
+                            chip,
+                            method: format!("firmware build (CONFIG_SOC={soc})"),
+                            generic: false,
+                        }));
+                    }
+                    Err(e) => eprintln!(
+                        "axyr: build says {name} but attach failed ({e}); probing the silicon instead"
+                    ),
+                }
+            } else {
+                eprintln!("axyr: CONFIG_SOC={soc} is not in the target registry; probing the silicon instead");
+            }
+        }
+
+        // 2) probe-rs's own silicon detection (vendors with detect sequences).
+        if let Ok(p) = Self::attach_selector(TargetSelector::Auto) {
+            let chip = p.chip.clone();
+            return Ok((p, Detection {
+                chip,
+                method: "silicon (probe-rs auto-detect)".to_string(),
+                generic: false,
+            }));
+        }
+
+        // 3+4) Generic attach, then identify ST silicon by its device id.
+        for generic in chip::CORTEX_GENERICS {
+            let Ok(mut p) = Self::attach(generic) else { continue };
+            if p.read_word_once(0xE000_ED00).is_err() {
+                continue; // wrong architecture guess — try the next core type
+            }
+            for &addr in chip::ST_DBGMCU_ADDRS {
+                let Ok(idcode) = p.read_word_once(addr) else { continue };
+                if let Some(name) = chip::resolve_st_devid(&registry, idcode) {
+                    drop(p); // release the probe before the precise re-attach
+                    let p = Self::attach(&name)?;
+                    return Ok((p, Detection {
+                        chip: name,
+                        method: format!("silicon (ST device id {:#05x})", idcode & 0xfff),
+                        generic: false,
+                    }));
+                }
+            }
+            let chip = p.chip.clone();
+            return Ok((p, Detection {
+                chip,
+                method: format!("fallback (unknown chip, generic {generic})"),
+                generic: true,
+            }));
+        }
+
+        Err("no debug probe found, or could not attach to the target".to_string())
     }
 
     /// Re-open the probe and re-attach the session — recovers a wedged SWD link
@@ -106,6 +210,14 @@ impl Probe {
             core.read_word_32(address)
                 .map_err(|e| format!("read {address:#010x}: {e}"))
         })
+    }
+
+    /// Single-attempt word read — for detection sweeps, where a failed read at
+    /// a candidate address is an expected (and fast) "not this one".
+    fn read_word_once(&mut self, address: u64) -> Result<u32, String> {
+        let mut core = self.session.core(0).map_err(|e| format!("core: {e}"))?;
+        core.read_word_32(address)
+            .map_err(|e| format!("read {address:#010x}: {e}"))
     }
 
     /// Read `out.len()` consecutive 32-bit words starting at `address`.

@@ -5,23 +5,41 @@
 //!
 //!   probe_check [chip] [elf-to-flash]
 //!
-//! Defaults the chip to the Nucleo-F401RE. If an ELF path is given, it is
-//! flashed after the read checks.
+//! Without a chip argument it auto-detects the target (the same layered
+//! detection `axyr` uses). If an ELF path is given, it is flashed after the
+//! read checks.
 
 use std::path::PathBuf;
 
-use axyr_engine::probe::{DEFAULT_CHIP, Probe};
+use axyr_engine::probe::Probe;
 
 fn main() {
-    let chip = std::env::args().nth(1).unwrap_or_else(|| DEFAULT_CHIP.to_string());
+    let chip = std::env::args().nth(1);
     let elf = std::env::args().nth(2).map(PathBuf::from);
 
-    println!("attaching to {chip} over SWD ...");
-    let mut probe = match Probe::attach(&chip) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("attach failed: {e}");
-            std::process::exit(1);
+    let mut probe = match chip {
+        Some(chip) => {
+            println!("attaching to {chip} over SWD ...");
+            match Probe::attach(&chip) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("attach failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => {
+            println!("auto-detecting the target over SWD ...");
+            match Probe::attach_auto(None) {
+                Ok((p, d)) => {
+                    println!("detected {} — {}", d.chip, d.method);
+                    p
+                }
+                Err(e) => {
+                    eprintln!("auto-attach failed: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
     };
     println!("attached.");

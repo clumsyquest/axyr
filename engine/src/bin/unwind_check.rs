@@ -7,7 +7,7 @@
 
 use std::env;
 
-use axyr_engine::probe::{DEFAULT_CHIP, Probe};
+use axyr_engine::probe::Probe;
 use axyr_engine::unwind;
 
 fn main() {
@@ -26,8 +26,11 @@ fn main() {
         regs.reason
     );
 
-    let chip = env::var("AXYR_CHIP").unwrap_or_else(|_| DEFAULT_CHIP.to_string());
-    let mut probe = Probe::attach(&chip).expect("attach probe");
+    let mut probe = match env::var("AXYR_CHIP") {
+        Ok(chip) => Probe::attach(&chip),
+        Err(_) => Probe::attach_auto(None).map(|(p, _)| p),
+    }
+    .expect("attach probe");
     let frames = unwind::backtrace(&args[1], &regs, |addr| probe.read_word(addr as u64).ok(), 32)
         .expect("unwind");
     println!("{}", unwind::format_backtrace(&frames));
