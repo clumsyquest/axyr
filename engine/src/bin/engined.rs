@@ -7,16 +7,26 @@
 //! mode — only the base URL changes. Run it on your LAN or in the cloud; the
 //! engine never needs USB access, only the agent does.
 //!
+//! Agents connect two ways:
+//! - `wss://host/agent` — a WebSocket upgrade on the HTTP port, so one HTTPS
+//!   edge (e.g. Railway's) carries the dashboard AND the agents, TLS included;
+//! - `ws://host:7879` — a plain TCP listener for LAN use (set
+//!   `AXYR_AGENT_LISTEN=off` to disable, e.g. in the cloud).
+//!
 //! Environment:
-//!   AXYR_HTTP          HTTP API bind (default 127.0.0.1:7878; PORT overrides
-//!                      the port and binds 0.0.0.0 — what Railway sets)
-//!   AXYR_AGENT_LISTEN  agent WebSocket bind (default 127.0.0.1:7879;
-//!                      AGENT_PORT overrides port and binds 0.0.0.0)
+//!   AXYR_HTTP          HTTP bind (default 127.0.0.1:7878; PORT overrides the
+//!                      port and binds 0.0.0.0 — what Railway sets)
+//!   AXYR_AGENT_LISTEN  plain agent listener (default 127.0.0.1:7879;
+//!                      AGENT_PORT overrides; "off" disables)
+//!   AXYR_TOKEN         shared secret agents must present (unset = open, for
+//!                      local development only)
 //!   AXYR_SVD           optional SVD path for peripheral decode
 
 use std::env;
 use std::fs;
-use std::net::{TcpListener, TcpStream};
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -25,6 +35,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::json;
+use tungstenite::protocol::Role;
 use tungstenite::{Message, WebSocket};
 
 use axyr_engine::agent::{self, Config};
@@ -33,6 +44,8 @@ use axyr_engine::remote::{self, RemoteLink};
 use axyr_engine::system_map;
 use axyr_engine::threads::ThreadTable;
 use axyr_engine::wire::{self, Hello};
+
+static SESSIONS: AtomicUsize = AtomicUsize::new(0);
 
 fn main() {
     let http_addr = env::var("AXYR_HTTP").unwrap_or_else(|_| match env::var("PORT") {
@@ -45,11 +58,10 @@ fn main() {
             Err(_) => "127.0.0.1:7879".to_string(),
         }
     });
-
-    let listener = TcpListener::bind(&agent_addr).unwrap_or_else(|e| {
-        eprintln!("axyr-engined: bind agent listener {agent_addr}: {e}");
-        std::process::exit(1);
-    });
+    let token = env::var("AXYR_TOKEN").ok();
+    if token.is_none() {
+        eprintln!("axyr-engined: WARNING — no AXYR_TOKEN set; any agent may connect (dev only)");
+    }
 
     // The HTTP front-end starts immediately; /connect says "no agent yet"
     // until one dials in, then each new agent session swaps the state below.
@@ -62,63 +74,117 @@ fn main() {
         connect: Mutex::new(json!({ "ready": false, "waiting": "no agent connected yet" }).to_string()),
         threads: Arc::new(Mutex::new(ThreadTable::new())),
     });
-    {
-        let http_shared = shared.clone();
-        let http_addr = http_addr.clone();
-        thread::spawn(move || api::serve_http(&http_addr, http_shared));
+
+    // Plain TCP agent listener (LAN / local use).
+    if agent_addr != "off" {
+        let listener = TcpListener::bind(&agent_addr).unwrap_or_else(|e| {
+            eprintln!("axyr-engined: bind agent listener {agent_addr}: {e}");
+            std::process::exit(1);
+        });
+        let shared_tcp = shared.clone();
+        let token_tcp = token.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                // Generous timeout for handshake + Hello (the ELF rides in it),
+                // tightened afterwards so the socket thread can multiplex.
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+                match tungstenite::accept(stream) {
+                    Ok(ws) => {
+                        let _ = ws.get_ref().set_read_timeout(Some(Duration::from_millis(5)));
+                        run_session(ws, &shared_tcp, token_tcp.as_deref());
+                    }
+                    Err(e) => eprintln!("axyr-engined: ws accept: {e}"),
+                }
+            }
+        });
     }
 
     eprintln!("axyr-engined — engine ready");
     eprintln!("  dashboard API : http://{http_addr}");
-    eprintln!("  agents dial   : ws://{agent_addr}");
+    eprintln!("  agents dial   : ws(s)://<this-host>/agent (same port){}", if agent_addr == "off" {
+        String::new()
+    } else {
+        format!("  or ws://{agent_addr}")
+    });
 
-    for (n, stream) in listener.incoming().flatten().enumerate() {
-        match accept_agent(stream, n) {
-            Ok((hello, ws)) => start_session(hello, ws, &shared, n),
-            Err(e) => eprintln!("axyr-engined: agent handshake failed: {e}"),
-        }
-    }
+    // Agents arriving through the HTTP edge (/agent upgrade). No read timeout
+    // is possible on the upgraded stream; the agent's idle pings keep the
+    // session loop ticking instead.
+    let shared_http = shared.clone();
+    let on_agent: api::AgentUpgrade = Box::new(move |stream| {
+        let ws = WebSocket::from_raw_socket(stream, Role::Server, None);
+        run_session(ws, &shared_http, token.as_deref());
+    });
+    api::serve_http(&http_addr, shared, Some(on_agent));
 }
 
-/// WebSocket-accept an incoming agent and read its Hello.
-fn accept_agent(stream: TcpStream, n: usize) -> Result<(Hello, WebSocket<TcpStream>), String> {
-    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-    // Generous timeout for the handshake + Hello (the ELF rides inside it),
-    // tightened afterwards so the socket thread can multiplex.
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .map_err(|e| format!("set timeout: {e}"))?;
-    let mut ws = tungstenite::accept(stream).map_err(|e| format!("ws accept: {e}"))?;
-
+/// Read the Hello, check the token, then start the session and return (the
+/// session itself runs on background threads).
+fn run_session<S: Read + Write + Send + 'static>(
+    mut ws: WebSocket<S>,
+    shared: &Arc<Shared>,
+    expected_token: Option<&str>,
+) {
+    let n = SESSIONS.fetch_add(1, Ordering::Relaxed);
     let hello: Hello = loop {
-        match ws.read().map_err(|e| format!("read hello: {e}"))? {
-            Message::Text(text) => break wire::decode(text.as_str())?,
-            Message::Close(_) => return Err("agent closed before hello".to_string()),
-            _ => continue,
+        match ws.read() {
+            Ok(Message::Text(text)) => match wire::decode(text.as_str()) {
+                Ok(h) => break h,
+                Err(e) => {
+                    eprintln!("axyr-engined: agent #{n}: bad hello: {e}");
+                    return;
+                }
+            },
+            Ok(Message::Close(_)) => return,
+            Ok(_) => continue,
+            // Timeout-based listeners surface WouldBlock while the Hello is
+            // still in flight; keep waiting (bounded by the 30s socket timeout
+            // ending in a real error).
+            Err(tungstenite::Error::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(e) => {
+                eprintln!("axyr-engined: agent #{n}: read hello: {e}");
+                return;
+            }
         }
     };
+
     if hello.wire_version != wire::WIRE_VERSION {
-        return Err(format!(
-            "agent #{n} from {peer} speaks wire v{}, engine is v{} — update the agent",
+        eprintln!(
+            "axyr-engined: agent #{n} speaks wire v{}, engine is v{} — update the agent",
             hello.wire_version,
             wire::WIRE_VERSION
-        ));
+        );
+        return;
+    }
+    if let Some(expected) = expected_token
+        && hello.token.as_deref() != Some(expected)
+    {
+        eprintln!("axyr-engined: agent #{n} rejected: bad or missing token");
+        let _ = ws.close(None);
+        return;
     }
     eprintln!(
-        "axyr-engined: agent #{n} connected from {peer} ({} v{}, chip {})",
+        "axyr-engined: agent #{n} connected ({} v{}, chip {})",
         hello.probe.as_ref().map(|(p, _)| p.as_str()).unwrap_or("unknown probe"),
         hello.agent_version,
         hello.chip
     );
-    ws.get_ref()
-        .set_read_timeout(Some(Duration::from_millis(5)))
-        .map_err(|e| format!("set timeout: {e}"))?;
-    Ok((hello, ws))
+    start_session(hello, ws, shared, n);
 }
 
 /// Materialize the uploaded artifacts, wire a RemoteLink to the socket, start
 /// the analysis loop, and swap this session into the HTTP front-end.
-fn start_session(hello: Hello, ws: WebSocket<TcpStream>, shared: &Arc<Shared>, n: usize) {
+fn start_session<S: Read + Write + Send + 'static>(
+    hello: Hello,
+    ws: WebSocket<S>,
+    shared: &Arc<Shared>,
+    n: usize,
+) {
     // Session workspace: the uploaded ELF/DTS as files, so every existing
     // analysis path (symbols, DWARF, devicetree) works unchanged.
     let dir = env::temp_dir().join(format!("axyr-engined-{}-{n}", std::process::id()));
@@ -164,10 +230,7 @@ fn start_session(hello: Hello, ws: WebSocket<TcpStream>, shared: &Arc<Shared>, n
 
     // Swap this session into the HTTP front-end (replaces a dead one after an
     // agent reconnect; the dashboard never has to care).
-    let board = hello
-        .dts
-        .as_deref()
-        .and_then(system_map::model);
+    let board = hello.dts.as_deref().and_then(system_map::model);
     let connect = json!({
         "probe": hello.probe.as_ref().map(|(p, s)| json!({ "name": p, "serial": s })),
         "board": board,
@@ -182,13 +245,12 @@ fn start_session(hello: Hello, ws: WebSocket<TcpStream>, shared: &Arc<Shared>, n
         "ready": true,
     })
     .to_string();
-    let set = |field: &Mutex<String>, v: String| {
-        if let Ok(mut g) = field.lock() {
-            *g = v;
-        }
-    };
-    set(&shared.crash_file, crash_file);
-    set(&shared.connect, connect);
+    if let Ok(mut g) = shared.crash_file.lock() {
+        *g = crash_file;
+    }
+    if let Ok(mut g) = shared.connect.lock() {
+        *g = connect;
+    }
     if let Ok(mut g) = shared.dts.lock() {
         *g = dts_path;
     }

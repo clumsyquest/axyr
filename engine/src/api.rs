@@ -10,8 +10,11 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
-use tiny_http::{Header, Method, Response, Server};
+use sha1::{Digest, Sha1};
+use tiny_http::{Header, Method, ReadWrite, Response, Server};
 
 use crate::agent::{Action, Command};
 use crate::system_map;
@@ -28,6 +31,13 @@ pub struct Shared {
     pub connect: Mutex<String>,
     pub threads: Arc<Mutex<ThreadTable>>,
 }
+
+/// Handler for an agent that connected via the `/agent` WebSocket upgrade —
+/// receives the raw upgraded stream (the HTTP 101 is already sent). Lets the
+/// engine ride agents over the SAME port as the dashboard API, so a single
+/// HTTPS edge (e.g. Railway's) carries both, and agents get TLS for free
+/// (`wss://engine-host/agent`).
+pub type AgentUpgrade = Box<dyn Fn(Box<dyn ReadWrite + Send>) + Send + Sync>;
 
 /// MCP over stdio: one JSON-RPC message per line.
 pub fn serve_mcp(
@@ -355,7 +365,7 @@ fn parse_address(s: &str) -> Result<u64, String> {
 /// sees a different view of the system than an MCP agent does. Responses are JSON
 /// for the JSON tools and plain text otherwise; CORS is permissive so a dashboard
 /// served from another origin can fetch it.
-pub fn serve_http(addr: &str, shared: Arc<Shared>) {
+pub fn serve_http(addr: &str, shared: Arc<Shared>, on_agent: Option<AgentUpgrade>) {
     let server = match Server::http(addr) {
         Ok(s) => s,
         Err(e) => {
@@ -386,6 +396,30 @@ pub fn serve_http(addr: &str, shared: Arc<Shared>) {
             let _ = request.respond(json_ok(&http_index()));
             continue;
         }
+        // Agent WebSocket upgrade: hand the raw socket to the engine server.
+        if method == Method::Get && path == "/agent" {
+            match (&on_agent, websocket_accept_key(&request)) {
+                (Some(handler), Some(accept)) => {
+                    let response = Response::empty(101)
+                        .with_header(header("Upgrade", "websocket"))
+                        .with_header(header("Connection", "Upgrade"))
+                        .with_header(header("Sec-WebSocket-Accept", &accept));
+                    let stream = request.upgrade("websocket", response);
+                    handler(stream);
+                }
+                (Some(_), None) => {
+                    let _ = request.respond(text_response("expected a websocket upgrade".into(), 400));
+                }
+                (None, _) => {
+                    let _ = request.respond(text_response(
+                        "this axyr instance does not accept remote agents".into(),
+                        404,
+                    ));
+                }
+            }
+            continue;
+        }
+
         // Connect screen: what board/probe/build was detected (static, no probe).
         if method == Method::Get && path == "/connect" {
             let connect = shared.connect.lock().map(|c| c.clone()).unwrap_or_default();
@@ -477,6 +511,24 @@ fn text_response(text: String, status: u16) -> Response<io::Cursor<Vec<u8>>> {
         .with_status_code(status)
         .with_header(header("Content-Type", "text/plain; charset=utf-8"))
         .with_header(header("Access-Control-Allow-Origin", "*"))
+}
+
+/// RFC 6455 handshake: derive Sec-WebSocket-Accept from the client's key.
+/// `None` if the request isn't a websocket upgrade.
+fn websocket_accept_key(request: &tiny_http::Request) -> Option<String> {
+    const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    let key = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Sec-WebSocket-Key"))?
+        .value
+        .as_str()
+        .trim()
+        .to_string();
+    let mut sha = Sha1::new();
+    sha.update(key.as_bytes());
+    sha.update(GUID.as_bytes());
+    Some(B64.encode(sha.finalize()))
 }
 
 fn header(key: &str, value: &str) -> Header {

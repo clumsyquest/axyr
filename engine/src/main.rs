@@ -158,6 +158,7 @@ fn main() {
         let hello = wire::Hello {
             wire_version: wire::WIRE_VERSION,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            token: env::var("AXYR_TOKEN").ok(),
             probe: probe_info.clone(),
             chip: chip.clone(),
             detection: detection.method.clone(),
@@ -230,7 +231,7 @@ fn main() {
             connect: Mutex::new(connect.clone()),
             threads: threads.clone(),
         });
-        thread::spawn(move || api::serve_http(&http_addr, shared));
+        thread::spawn(move || api::serve_http(&http_addr, shared, None));
     }
 
     api::serve_mcp(&crash_file, dts.as_deref(), firmware_dir.as_deref(), &cmd_tx, &threads);

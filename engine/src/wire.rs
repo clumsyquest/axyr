@@ -24,6 +24,10 @@ pub const WIRE_VERSION: u32 = 1;
 pub struct Hello {
     pub wire_version: u32,
     pub agent_version: String,
+    /// Shared secret (AXYR_TOKEN on both ends). The engine rejects the session
+    /// when it expects one and this doesn't match.
+    #[serde(default)]
+    pub token: Option<String>,
     /// Probe identity (name, serial), if one was listed.
     pub probe: Option<(String, Option<String>)>,
     /// The probe-rs target we attached to and how it was detected.

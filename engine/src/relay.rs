@@ -47,6 +47,11 @@ pub fn run(mut link: LocalLink, hello: &Hello, url: &str) -> ! {
 }
 
 fn connect(url: &str) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, String> {
+    // rustls 0.23 needs a process-level crypto provider picked explicitly.
+    static CRYPTO: std::sync::Once = std::sync::Once::new();
+    CRYPTO.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
     let (ws, _) = tungstenite::connect(url).map_err(|e| e.to_string())?;
     // A short read timeout lets the loop interleave telemetry pushes with
     // request handling on one thread.
@@ -71,6 +76,14 @@ fn serve(link: &mut LocalLink, ws: &mut WebSocket<MaybeTlsStream<TcpStream>>) {
         if !chunk.is_empty() {
             let frame = AgentFrame::Telemetry { data_b64: B64.encode(&chunk) };
             if ws.send(Message::Text(wire::encode(&frame).into())).is_err() {
+                return;
+            }
+        } else {
+            // Idle keepalive: when the engine sits behind an HTTP edge it has
+            // no read timeout on the upgraded socket — its loop wakes on every
+            // incoming frame, so a steady tick bounds request latency to one
+            // poll period. Also tells proxies the connection is alive.
+            if ws.send(Message::Ping(Vec::new().into())).is_err() {
                 return;
             }
         }

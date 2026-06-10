@@ -78,9 +78,11 @@ dependencies = [
  "gimli 0.33.0",
  "object 0.39.1",
  "probe-rs",
+ "rustls",
  "serde",
  "serde_json",
  "serialport",
+ "sha1",
  "svd-parser",
  "tiny_http",
  "tungstenite",
@@ -1503,7 +1505,9 @@ version = "0.23.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
+ "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
