@@ -29,29 +29,42 @@ use axyr_engine::threads::ThreadTable;
 use axyr_engine::system_map;
 
 fn main() {
-    // Usage: axyr-engine <elf> <addr2line> <crash-file>
     let args: Vec<String> = env::args().collect();
-    if args.len() != 3 {
-        eprintln!("usage: {} <elf> <crash-file>", args[0]);
-        std::process::exit(1);
-    }
-    let elf = args[1].clone();
-    let crash_file = args[2].clone();
+
+    // Zero-config: auto-detect the firmware build. argv[1] may be an explicit
+    // ELF, a project/build directory, or absent (search the cwd). This is what
+    // makes `axyr` "plug in and go" — no env vars to set.
+    let (elf, dts_found) = match resolve_build(args.get(1).map(String::as_str)) {
+        Some(b) => b,
+        None => {
+            eprintln!("axyr: no firmware build found.");
+            eprintln!("  run `axyr` from your project (it looks for build/zephyr/zephyr.elf),");
+            eprintln!("  or pass a path:  axyr <build-dir|firmware.elf> [crash-file]");
+            std::process::exit(1);
+        }
+    };
+    let crash_file = args.get(2).cloned().unwrap_or_else(|| {
+        env::temp_dir().join("axyr-last-crash.txt").display().to_string()
+    });
 
     let chip = env::var("AXYR_CHIP").unwrap_or_else(|_| DEFAULT_CHIP.to_string());
-    let dts = env::var("AXYR_DTS").ok();
+    // Devicetree: explicit env wins, else the one found beside the ELF.
+    let dts = env::var("AXYR_DTS").ok().or(dts_found);
     // Crash backtraces use native DWARF unwinding (no toolchain needed); GDB is
     // an optional fallback when these env vars point at Zephyr's coredump tools.
     let coredump = CoredumpTools::from_env(&elf);
-    if coredump.is_none() {
-        eprintln!("note: GDB coredump fallback not configured; using native unwinding only");
-    }
 
-    // The agent owns the probe; we keep only the command sender.
-    let probe = Probe::attach(&chip).unwrap_or_else(|e| {
-        eprintln!("attach to {chip}: {e}");
+    // Identify the probe before attaching (for the dashboard's Connect screen).
+    let probe_info = Probe::list_first();
+
+    let mut probe = Probe::attach(&chip).unwrap_or_else(|e| {
+        eprintln!("axyr: no debug probe / attach failed ({e}).");
+        eprintln!("  plug your board's USB (its on-board ST-LINK), then run `axyr` again.");
         std::process::exit(1);
     });
+    // Read the chip identity straight from the silicon (CPUID + STM32 IDCODE).
+    let (cpuid, idcode) = probe.identity();
+
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
     let svd_path = env::var("AXYR_SVD").ok();
     // Where the agent may discover flashable firmware images (defaults to the
@@ -67,8 +80,16 @@ fn main() {
                 .collect()
         })
         .unwrap_or_default();
+
+    // Board name from the devicetree model, for the Connect screen + banner.
+    let board = dts
+        .as_deref()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|s| system_map::model(&s));
+    let connect = build_connect(&probe_info, &elf, dts.as_deref(), board.as_deref(), &chip, cpuid, idcode);
+
     let cfg = Config {
-        elf,
+        elf: elf.clone(),
         crash_file: crash_file.clone(),
         coredump,
         svd_path,
@@ -81,23 +102,91 @@ fn main() {
     let threads_agent = threads.clone();
     thread::spawn(move || agent::run(probe, cfg, cmd_rx, threads_agent));
 
-    // The HTTP/WS-style API: a second front-end (alongside MCP stdio) that the
-    // web dashboard consumes. It routes to the SAME dispatch, so it never gets a
-    // different view of the system than an MCP agent does. Localhost-only by
-    // default; set AXYR_HTTP=off to disable, or AXYR_HTTP=<addr:port> to change.
+    // Friendly startup banner — what we detected, and where the dashboard is.
+    eprintln!("axyr — agent ready");
+    eprintln!(
+        "  probe : {}",
+        probe_info
+            .as_ref()
+            .map(|(n, s)| format!("{n}{}", s.as_ref().map(|x| format!(" · {x}")).unwrap_or_default()))
+            .unwrap_or_else(|| "?".to_string())
+    );
+    eprintln!("  board : {}", board.as_deref().unwrap_or(&chip));
+    eprintln!("  build : {elf}");
+
+    // The HTTP API: the second front-end (alongside MCP stdio) the dashboard
+    // consumes. Same dispatch as MCP, so both see one truth. Localhost-only by
+    // default; AXYR_HTTP=off disables it, AXYR_HTTP=<addr:port> changes it.
     let http_addr = env::var("AXYR_HTTP").unwrap_or_else(|_| "127.0.0.1:7878".to_string());
     if http_addr != "off" {
-        let (cf, d, fw, tx, th) = (
+        eprintln!("  dashboard API: http://{http_addr}  (open the dashboard — it will detect this board)");
+        let (cf, d, fw, tx, th, cj) = (
             crash_file.clone(),
             dts.clone(),
             firmware_dir.clone(),
             cmd_tx.clone(),
             threads.clone(),
+            connect.clone(),
         );
-        thread::spawn(move || serve_http(&http_addr, &cf, d.as_deref(), fw.as_deref(), &tx, &th));
+        thread::spawn(move || serve_http(&http_addr, &cf, d.as_deref(), fw.as_deref(), &tx, &th, &cj));
     }
 
     serve_mcp(&crash_file, dts.as_deref(), firmware_dir.as_deref(), &cmd_tx, &threads);
+}
+
+/// Resolve the firmware build to watch: an explicit ELF, a directory to search,
+/// or the current directory. Returns `(elf, dts?)`.
+fn resolve_build(arg: Option<&str>) -> Option<(String, Option<String>)> {
+    match arg {
+        Some(p) if std::path::Path::new(p).is_file() => {
+            Some((p.to_string(), sibling_dts(p)))
+        }
+        Some(p) if std::path::Path::new(p).is_dir() => find_build_in(p),
+        Some(_) => None, // a path was given but doesn't exist
+        None => find_build_in("."),
+    }
+}
+
+/// Search the common Zephyr build locations under `dir` for `zephyr.elf`.
+fn find_build_in(dir: &str) -> Option<(String, Option<String>)> {
+    let base = std::path::Path::new(dir);
+    for c in ["build/zephyr/zephyr.elf", "zephyr/zephyr.elf", "zephyr.elf"] {
+        let elf = base.join(c);
+        if elf.is_file() {
+            let elf_s = elf.display().to_string();
+            return Some((elf_s.clone(), sibling_dts(&elf_s)));
+        }
+    }
+    None
+}
+
+/// The `zephyr.dts` sitting next to the ELF, if present.
+fn sibling_dts(elf: &str) -> Option<String> {
+    let p = std::path::Path::new(elf).with_file_name("zephyr.dts");
+    p.is_file().then(|| p.display().to_string())
+}
+
+/// The JSON the dashboard's Connect screen reads (GET /connect): what board /
+/// probe / build was detected, so the user confirms with one click.
+fn build_connect(
+    probe: &Option<(String, Option<String>)>,
+    elf: &str,
+    dts: Option<&str>,
+    board: Option<&str>,
+    chip: &str,
+    cpuid: Option<u32>,
+    idcode: Option<u32>,
+) -> String {
+    json!({
+        "probe": probe.as_ref().map(|(n, s)| json!({ "name": n, "serial": s })),
+        "board": board,
+        "chip": chip,
+        "cpuid": cpuid.map(|c| format!("{c:#010x}")),
+        "dev_id": idcode.map(|c| format!("{:#05x}", c & 0xfff)),
+        "build": { "elf": elf, "dts": dts },
+        "ready": probe.is_some(),
+    })
+    .to_string()
 }
 
 /// MCP over stdio: one JSON-RPC message per line.
@@ -433,6 +522,7 @@ fn serve_http(
     firmware_dir: Option<&str>,
     cmd_tx: &Sender<Command>,
     threads: &Arc<Mutex<ThreadTable>>,
+    connect: &str,
 ) {
     let server = match Server::http(addr) {
         Ok(s) => s,
@@ -441,7 +531,6 @@ fn serve_http(
             return;
         }
     };
-    eprintln!("HTTP API on http://{addr}");
 
     for mut request in server.incoming_requests() {
         let method = request.method().clone();
@@ -463,6 +552,11 @@ fn serve_http(
         // Index route describes the API.
         if method == Method::Get && path == "/" {
             let _ = request.respond(json_ok(&http_index()));
+            continue;
+        }
+        // Connect screen: what board/probe/build was detected (static, no probe).
+        if method == Method::Get && path == "/connect" {
+            let _ = request.respond(json_ok(connect));
             continue;
         }
 
@@ -589,6 +683,7 @@ fn http_index() -> String {
     json!({
         "service": "axyr-engine",
         "endpoints": {
+            "GET /connect": "detected board / probe / build for the Connect screen (JSON)",
             "GET /snapshot": "whole system snapshot (JSON)",
             "GET /graph": "system as nodes+edges for the schematic view (JSON)",
             "GET /system_map": "hardware map (text)",
