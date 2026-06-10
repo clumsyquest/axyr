@@ -26,7 +26,7 @@ function buildGroups(nodes) {
   return GROUP_DEFS
     .map(def => ({
       id: def.id, side: def.side, label: def.label,
-      ids: nodes.filter(n => n.id !== 'soc' && groupOf(n.kind) === def.id).map(n => n.id),
+      ids: nodes.filter(n => n.id !== 'soc' && !n.noise && groupOf(n.kind) === def.id).map(n => n.id),
     }))
     .filter(g => g.ids.length);
 }
@@ -160,11 +160,14 @@ function SystemMap({ mode, selected, onSelect, counter }) {
     // foot
     h('div', { className: 'ax-map-foot', key: 'foot' }, [
       h('div', { className: 'ax-legend', key: 'leg' }, [
-        h('span', { className: 'lg', key: '1' }, [h('i', { className: 'lg-dot active', key: 'd' }), 'active']),
+        h('span', { className: 'lg', key: '1' }, [h('i', { className: 'lg-dot active', key: 'd' }), 'active (live reads)']),
         h('span', { className: 'lg', key: '2' }, [h('i', { className: 'lg-dot bus', key: 'd' }), 'open bus port']),
         crashed && h('span', { className: 'lg', key: '3' }, [h('i', { className: 'lg-dot fault', key: 'd' }), 'fault']),
+        !crashed && h('span', { className: 'lg', key: '4', title: 'Per-transaction bus traffic needs SWO/ITM trace (roadmap)' },
+          [h('i', { className: 'lg-dot', key: 'd', style: { border: '1.5px dashed var(--line-strong)' } }), 'bus traffic → trace']),
       ]),
-      !crashed && counter != null && h('span', { className: 'ax-flow-note', key: 'fn' }, '● axyr_counter = ' + counter.toLocaleString('en-US') + ' → SRAM'),
+      !crashed && counter != null && h('span', { className: 'ax-flow-note', key: 'fn' },
+        '● ' + window.AX_VAR_BASE.name + ' = ' + counter.toLocaleString('en-US') + ' → SRAM (live)'),
     ]),
   ]);
 }

@@ -467,3 +467,24 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 .ax-demo-banner .ax-demo-ic{flex:0 0 auto;color:var(--warn);display:grid;place-items:center}
 .ax-demo-banner b{font-weight:700}
 .ax-demo-banner code{font-family:var(--mono);font-size:11px;background:rgba(120,90,0,.10);padding:1px 6px;border-radius:5px}
+
+/* ---------- history · compare two states ---------- */
+.ax-hist-label{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.ax-hist-cmp{font-size:9.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--muted);
+  background:var(--panel-2);border:1px solid var(--line-2);border-radius:14px;padding:2px 9px}
+.ax-hist-cmp:hover{border-color:var(--accent-line);color:var(--accent)}
+.ax-hist-cmp.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.ax-replay-body{flex:1;min-width:0}
+.ax-hist-pins{display:flex;gap:5px;flex:0 0 auto;align-self:center}
+.ax-hist-pin{font-size:10px;font-weight:600;color:var(--muted);background:var(--panel);border:1px solid var(--line-2);
+  border-radius:6px;padding:3px 8px}
+.ax-hist-pin:hover{border-color:var(--accent-line);color:var(--accent)}
+.ax-hist-pin.set{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+.ax-cmp{border:1px solid var(--line);border-radius:9px;overflow:hidden;margin-bottom:11px}
+.ax-cmp-hd{font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--faint);
+  background:var(--panel-2);padding:7px 11px;border-bottom:1px solid var(--line)}
+.ax-cmp-hd b{color:var(--ink-2)}
+.ax-cmp-row{display:flex;justify-content:space-between;gap:12px;padding:6px 11px;border-bottom:1px dashed var(--line)}
+.ax-cmp-row:last-child{border-bottom:none}
+.ax-cmp-k{font-size:11px;color:var(--muted)}
+.ax-cmp-v{font-size:11.5px;color:var(--ink-2);text-align:right}

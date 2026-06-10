@@ -43,6 +43,10 @@
       if (p === 'soc') return 'soc';
       return 'leaf';
     };
+    // Infrastructure leaves the devicetree carries but that clutter a system
+    // overview: flash partitions, raw oscillator sources, NVIC/SysTick, etc.
+    // Flagged `noise` → folded out of the schematic (still in the raw graph).
+    const NOISE = /(_partition$)|nvmem|layout|^clk_|^rctl$|^stop$|^vref$|^vbat$|^nvic$|^systick$/i;
     return (g.nodes || [])
       .filter((n) => n.id !== 'board') // synthetic root, not a device
       .map((n) => ({
@@ -53,7 +57,21 @@
         addr: n.address || null,
         bus: /bus/.test(n.kind || ''),
         compatible: n.compatible || n.kind || '',
+        noise: tierOf(n.id) === 'leaf' || NOISE.test(n.id),
       }));
+  }
+
+  // The honestly-active nodes when running: the CPU runs, the watched global
+  // lives in RAM, the clocks are locked, code is fetched from flash. Derived
+  // from the real node set — never a hard-coded list, never invented traffic.
+  function deriveActive(nodes) {
+    const pick = (pred) => nodes.filter((n) => pred(n) && !n.noise).map((n) => n.id);
+    return [
+      ...pick((n) => n.kind === 'core'),
+      ...pick((n) => n.kind === 'ram'),
+      ...pick((n) => n.kind === 'clock'),
+      ...pick((n) => n.kind === 'flash'),
+    ];
   }
 
   // Pull a few decoded fields out of the snapshot, defensively — every field
@@ -107,20 +125,23 @@
     return mode;
   }
 
-  // Fetch /snapshot + /graph and populate the globals before the first render.
+  // Fetch /snapshot + /graph + /history and populate the globals before render.
   async function hydrate() {
-    const [snap, graph] = await Promise.all([
+    const [snap, graph, history] = await Promise.all([
       get('/snapshot').catch(() => null),
       get('/graph').catch(() => null),
+      get('/history').catch(() => null),
     ]);
     if (!snap && !graph) throw new Error('engine offline');
     if (graph && Array.isArray(graph.nodes) && graph.nodes.length) {
       window.AX_NODES = nodesFromGraph(graph);
+      window.AX_ACTIVE_RUNNING = deriveActive(window.AX_NODES);
       if (Array.isArray(graph.disabled)) {
         window.AX_DISABLED = graph.disabled.slice(0, 12);
         window.AX_DISABLED_TOTAL = graph.disabled.length;
       }
     }
+    if (Array.isArray(history) && history.length) window.AX_HISTORY = history;
     window.AX_LIVE_MODE = snap ? hydrateFromSnapshot(snap) : 'running';
     window.AX_LIVE = true;
   }

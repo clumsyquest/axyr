@@ -157,47 +157,110 @@ function Timeline({ mode }) {
           ]),
         ])
       )),
-      // history · replay (real events: context switches running / telemetry crashed)
-      hp(Replay, { mode, key: 'rep' }),
+      // history · real get_history time-series + compare two states (diff_snapshot)
+      hp(History, { mode, key: 'rep' }),
     ]),
   ]);
 }
 
-// ---- History replay (scrub real events) --------------------
-const uSt = React.useState, uEf = React.useEffect;
-function Replay({ mode }) {
-  const crashed = mode === 'crashed';
+// ---- History (real get_history time-series + compare two states) ----------
+const uSt = React.useState, uEf = React.useEffect, uMo = React.useMemo;
+
+// Build the scrubable points. LIVE → the engine's recorded get_history ticks
+// {t_ms, core, threads, variables}; DEMO → the bundled real context-switch
+// timeline; CRASHED → the real serial telemetry to the fault. Each carries a
+// `state` so two points can be diffed. Never invented.
+function buildTicks(mode) {
+  const live = !!window.AX_LIVE;
+  if (mode === 'crashed') {
+    return window.AX_CRASH.recent_telemetry.map((line) => ({
+      label: line,
+      tag: (line.includes('FAULT') || line.includes('<err>')) ? 'fault' : line.includes('About to crash') ? 'pre' : 'boot',
+      state: null,
+    }));
+  }
+  if (live && Array.isArray(window.AX_HISTORY) && window.AX_HISTORY.length) {
+    const vname = window.AX_VAR_BASE.name;
+    return window.AX_HISTORY.map((hk) => {
+      const v = (hk.variables || [])[0];
+      const counter = v ? (typeof v.value === 'number' ? v.value : parseInt(v.value, 10)) : null;
+      return {
+        label: 'core ' + (hk.core || '?') + (counter != null ? ' · ' + vname + ' = ' + counter : ''),
+        sub: hk.t_ms != null ? (hk.t_ms / 1000).toFixed(1) + ' s' : '',
+        tag: hk.core === 'running' ? 'main' : hk.core === 'halted' ? 'fault' : 'idle',
+        state: {
+          core: hk.core, counter,
+          threads: Object.fromEntries((hk.threads || []).map((t) => [t.name, { cpu: t.cpu_pct, stack: t.stack_pct }])),
+        },
+      };
+    });
+  }
   const clk = window.AX_DEVICE.clkMHz * 1e6;
-  const events = crashed
-    ? window.AX_CRASH.recent_telemetry.map((line) => ({
-        label: line,
-        tag: (line.includes('FAULT') || line.includes('<err>')) ? 'fault' : line.includes('About to crash') ? 'pre' : 'boot',
-      }))
-    : window.AX_TIMELINE.map((e) => ({
-        label: e.thread + ' running',
-        sub: e.cycles.toLocaleString('en-US') + ' cyc · ' + (e.cycles / clk * 1000).toFixed(2) + ' ms',
-        tag: e.thread,
-      }));
-  const last = events.length - 1;
+  return window.AX_TIMELINE.map((e) => ({
+    label: e.thread + ' running',
+    sub: e.cycles.toLocaleString('en-US') + ' cyc · ' + (e.cycles / clk * 1000).toFixed(2) + ' ms',
+    tag: e.thread,
+    state: { core: e.thread === 'main' ? 'running' : 'sleeping', thread: e.thread, cycles: e.cycles },
+  }));
+}
+
+// What changed between two recorded states — the "compare two states" view.
+function diffStates(a, b) {
+  if (!a || !b) return [['—', 'pick two points to compare']];
+  const rows = [];
+  if (a.core !== b.core) rows.push(['core', a.core + ' → ' + b.core]);
+  if (a.counter != null && b.counter != null && a.counter !== b.counter) {
+    const d = b.counter - a.counter;
+    rows.push([window.AX_VAR_BASE.name, (d >= 0 ? '+' : '') + d.toLocaleString('en-US') + '   (' + a.counter + ' → ' + b.counter + ')']);
+  }
+  if (a.thread && b.thread && a.thread !== b.thread) rows.push(['running', a.thread + ' → ' + b.thread]);
+  if (a.cycles != null && b.cycles != null && a.cycles !== b.cycles) rows.push(['Δ cycles', (b.cycles - a.cycles).toLocaleString('en-US')]);
+  if (a.threads && b.threads) {
+    Object.keys(b.threads).forEach((name) => {
+      const x = a.threads[name], y = b.threads[name];
+      if (x && y && x.cpu !== y.cpu) rows.push([name + ' CPU', x.cpu + '% → ' + y.cpu + '%']);
+      if (x && y && x.stack !== y.stack) rows.push([name + ' stack', x.stack + '% → ' + y.stack + '%']);
+    });
+  }
+  return rows.length ? rows : [['—', 'no change between these two points']];
+}
+
+function History({ mode }) {
+  const crashed = mode === 'crashed';
+  const ticks = uMo(() => buildTicks(mode), [mode]);
+  const last = ticks.length - 1;
   const [i, setI] = uSt(crashed ? last : 0);
   const [playing, setPlaying] = uSt(false);
-  uEf(() => { setI(crashed ? last : 0); setPlaying(false); }, [mode]);
+  const [cmp, setCmp] = uSt(false);
+  const [a, setA] = uSt(0);
+  const [b, setB] = uSt(Math.max(last, 0));
+  uEf(() => { setI(crashed ? last : 0); setPlaying(false); setCmp(false); setA(0); setB(Math.max(last, 0)); }, [mode]);
   uEf(() => {
     if (!playing) return;
     const t = setInterval(() => setI(p => (p >= last ? (clearInterval(t), p) : p + 1)), 720);
     return () => clearInterval(t);
   }, [playing, last]);
   uEf(() => { if (playing && i >= last) setPlaying(false); }, [i, playing, last]);
-  const cur = events[Math.min(i, last)] || events[0];
-  const endMs = crashed ? null : (window.AX_TIMELINE[last].cycles / clk * 1000).toFixed(0);
+
+  const cur = ticks[Math.min(i, last)] || ticks[0];
+  const clk = window.AX_DEVICE.clkMHz * 1e6;
+  const endMs = crashed ? null : (window.AX_TIMELINE[window.AX_TIMELINE.length - 1].cycles / clk * 1000).toFixed(0);
+  const canCompare = !crashed && ticks.length > 1 && !!ticks[0].state;
 
   return hp('div', { className: 'ax-replay', key: 'rep' }, [
-    hp('div', { className: 'ax-sub-label', key: 'l' }, crashed ? 'History · replay to the fault' : 'History · what ran when'),
+    hp('div', { className: 'ax-sub-label ax-hist-label', key: 'l' }, [
+      hp('span', { key: 't' }, crashed ? 'History · replay to the fault' : 'History · ' + (window.AX_LIVE ? 'get_history (live)' : 'what ran when')),
+      canCompare && hp('button', { className: 'ax-hist-cmp' + (cmp ? ' on' : ''), key: 'c', onClick: () => setCmp(v => !v) }, cmp ? 'comparing A↔B' : 'compare'),
+    ]),
     hp('div', { className: 'ax-replay-cur ' + cur.tag, key: 'cur' }, [
-      hp('span', { className: 'ax-replay-step mono', key: 's' }, (i + 1) + '/' + events.length),
-      hp('div', { key: 'tx' }, [
+      hp('span', { className: 'ax-replay-step mono', key: 's' }, (i + 1) + '/' + ticks.length),
+      hp('div', { className: 'ax-replay-body', key: 'tx' }, [
         hp('div', { className: 'ax-replay-lb' + (crashed ? ' mono' : ''), key: 'a' }, cur.label),
         cur.sub && hp('div', { className: 'ax-replay-sub mono', key: 'b' }, cur.sub),
+      ]),
+      cmp && canCompare && hp('div', { className: 'ax-hist-pins', key: 'pins' }, [
+        hp('button', { className: 'ax-hist-pin' + (a === i ? ' set' : ''), key: 'a', onClick: () => setA(i) }, a === i ? 'A ✓' : 'set A'),
+        hp('button', { className: 'ax-hist-pin' + (b === i ? ' set' : ''), key: 'b', onClick: () => setB(i) }, b === i ? 'B ✓' : 'set B'),
       ]),
     ]),
     hp('div', { className: 'ax-replay-ctrl', key: 'ctrl' }, [
@@ -206,10 +269,18 @@ function Replay({ mode }) {
       hp('input', { type: 'range', className: 'ax-scrub', key: 'r', min: 0, max: last, step: 1, value: Math.min(i, last),
         onChange: (e) => { setPlaying(false); setI(+e.target.value); } }),
     ]),
+    cmp && canCompare && hp('div', { className: 'ax-cmp', key: 'cmp' }, [
+      hp('div', { className: 'ax-cmp-hd', key: 'hd' }, ['compare A ', hp('b', { key: 'a' }, '#' + (a + 1)), ' ↔ B ', hp('b', { key: 'b' }, '#' + (b + 1)), ' · diff_snapshot']),
+      ...diffStates((ticks[Math.min(a, last)] || {}).state, (ticks[Math.min(b, last)] || {}).state).map((row, k) =>
+        hp('div', { className: 'ax-cmp-row', key: k }, [
+          hp('span', { className: 'ax-cmp-k', key: 'k' }, row[0]),
+          hp('span', { className: 'ax-cmp-v mono', key: 'v' }, row[1]),
+        ])),
+    ]),
     hp('div', { className: 'ax-replay-axis mono', key: 'ax' }, [
-      hp('span', { key: '0' }, crashed ? 'boot' : '0 cyc'),
-      hp('span', { className: 'ax-replay-note', key: 'n' }, crashed ? '↔ ~28 ms coredump capture' : '↔ 250 ms loop · ' + window.AX_DEVICE.clkMHz + ' MHz'),
-      hp('span', { key: '1' }, crashed ? 'BUS FAULT' : endMs + ' ms'),
+      hp('span', { key: '0' }, crashed ? 'boot' : (window.AX_LIVE ? '0 s' : '0 cyc')),
+      hp('span', { className: 'ax-replay-note', key: 'n' }, crashed ? '↔ ~28 ms coredump capture' : (window.AX_LIVE ? '↔ recorded ticks' : '↔ 250 ms loop · ' + window.AX_DEVICE.clkMHz + ' MHz')),
+      hp('span', { key: '1' }, crashed ? 'BUS FAULT' : (window.AX_LIVE ? 'now' : endMs + ' ms')),
     ]),
   ]);
 }
