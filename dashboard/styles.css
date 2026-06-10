@@ -460,3 +460,10 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
   .ax-msg-bub{max-width:230px}
   .ax-map{height:62vh;min-height:300px}
 }
+
+/* ---------- demo / connection banner ---------- */
+.ax-demo-banner{display:flex;align-items:center;gap:10px;padding:9px 16px;background:var(--warn-soft);
+  border-bottom:1px solid var(--warn);color:oklch(0.42 0.09 70);font-size:12px;line-height:1.45;z-index:4}
+.ax-demo-banner .ax-demo-ic{flex:0 0 auto;color:var(--warn);display:grid;place-items:center}
+.ax-demo-banner b{font-weight:700}
+.ax-demo-banner code{font-family:var(--mono);font-size:11px;background:rgba(120,90,0,.10);padding:1px 6px;border-radius:5px}

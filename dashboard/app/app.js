@@ -101,6 +101,15 @@ function App() {
     hA(Rail, { view, setView, key: 'rail' }),
     hA('div', { className: 'ax-main', key: 'main' }, [
       hA(StatusBar, { mode, onTriggerFault: triggerFault, onReboot: reboot, onFlash: flash, key: 'status' }),
+      !window.AX_LIVE && hA('div', { className: 'ax-demo-banner', key: 'demo' }, [
+        hA('span', { className: 'ax-demo-ic', key: 'i' }, UI.warn({ s: 15 })),
+        hA('span', { key: 't' }, [
+          hA('b', { key: 'b' }, 'Demo data'),
+          ' — not connected to a board. This is the two real demo firmwares (live_demo / crash_demo), nothing live. To see your real system, run the engine and open ',
+          hA('code', { key: 'c' }, '?engine=http://127.0.0.1:7878'),
+          '.',
+        ]),
+      ]),
       view === 'system'
         ? hA('div', { className: 'ax-system', key: 'sys' }, [
             hA('div', { className: 'ax-sys-main', key: 'm' }, [
