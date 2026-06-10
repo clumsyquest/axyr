@@ -5,6 +5,25 @@ The "DevTools / F12 for microcontrollers": an open-source layer that captures a 
 ## Why
 Debugging embedded systems often means flying blind: a board reboots, a HardFault fires, and you're left guessing. Axyr turns that opaque failure into a clear, structured explanation — cause, function, file:line, registers — exposed both to humans and to AI agents.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/clumsyquest/axyr/main/install.sh | sh
+```
+
+Linux (x86_64 / aarch64) and macOS (Intel / Apple Silicon). The script downloads
+the latest [release](https://github.com/clumsyquest/axyr/releases), verifies its
+checksum, and installs `axyr` to `~/.local/bin` — no sudo. Then, from your
+Zephyr project, with the board plugged in:
+
+```bash
+axyr
+```
+
+It finds your firmware build, auto-detects the chip, and serves the dashboard
+API locally. (Pin a version with `AXYR_VERSION=v0.1.0`, change the directory
+with `AXYR_INSTALL_DIR=...`.)
+
 ## Structure
 - `firmware/`  — on-device code (C, Zephyr) running on the chip
 - `engine/`    — host engine + MCP server (Rust)
