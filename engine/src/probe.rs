@@ -43,6 +43,25 @@ pub struct Probe {
 }
 
 impl Probe {
+    /// Identify the first connected debug probe (name, serial) **without
+    /// attaching** — for the dashboard's "board detected" Connect screen.
+    pub fn list_first() -> Option<(String, Option<String>)> {
+        Lister::new()
+            .list_all()
+            .into_iter()
+            .next()
+            .map(|i| (i.identifier.clone(), i.serial_number.clone()))
+    }
+
+    /// Read the chip identity straight from silicon: the Cortex-M CPUID and, on
+    /// STM32, the DBGMCU IDCODE (its low 12 bits are the device id, e.g. 0x433
+    /// for the STM32F401). Either is `None` if the read isn't supported.
+    pub fn identity(&mut self) -> (Option<u32>, Option<u32>) {
+        let cpuid = self.read_word(0xE000_ED00).ok();
+        let idcode = self.read_word(0xE004_2000).ok();
+        (cpuid, idcode)
+    }
+
     /// Attach to the first probe and the given chip **without resetting or
     /// halting** the core, so we observe the system as it actually runs.
     pub fn attach(chip: &str) -> Result<Self, String> {

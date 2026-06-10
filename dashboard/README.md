@@ -28,14 +28,35 @@ The map **adapts to any project**: blocks are derived from each node's devicetre
 `kind`, so a new board with different peripherals lays itself out — nothing is
 hard-coded per board.
 
-## Running it
+## How a developer connects a board
+
+Only one thing is installed on the dev's machine: the **`axyr` agent** (the engine
+binary) — a thin local program that drives the debug probe over USB (the cloud
+can't reach USB). Everything else (the dashboard, later the cloud engine) is web.
+
+1. Run the agent from your firmware project — **zero config**:
+   ```bash
+   axyr            # auto-detects the probe + the build (build/zephyr/zephyr.elf) + the chip
+   ```
+   It prints what it found and serves the dashboard API on `127.0.0.1:7878`.
+2. Open the dashboard. The **Connect screen** shows what was detected —
+   *"🟢 STM32F401RE-NUCLEO via ST-LINK · id 0x433 · build …"* — and you click
+   **Connect**. One click. If no agent is running, the screen shows the install
+   steps and an "explore the demo" link instead.
+
+The agent identifies the chip straight from the silicon (CPUID + STM32 IDCODE),
+finds the build artifacts in your own project, and needs no env vars. (The cloud
+sign-in / hosted relay is the next roadmap step; today the agent + dashboard run
+locally.)
+
+## Running it (dashboard alone)
 
 No build step. Serve the folder statically and open it:
 
 ```bash
 cd dashboard
 python3 -m http.server 8099
-# open http://127.0.0.1:8099
+# open http://127.0.0.1:8099   → Connect screen (detects the agent, or offers the demo)
 ```
 
 (React is loaded from a CDN; the components use `React.createElement` directly, so

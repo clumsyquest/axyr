@@ -130,4 +130,78 @@ function App() {
   ]);
 }
 
-window.AxApp = App;
+// ---- Connect gate: detect the board, one click to go live ----------------
+function Connect({ info, onConnect, onDemo, onRetry }) {
+  const ready = info && info.ready;
+  const probe = info && info.probe;
+  const body = ready
+    ? [
+        hA('div', { className: 'ax-connect-detected', key: 'd' }, [
+          hA('span', { className: 'ax-connect-led', key: 'l' }),
+          hA('div', { key: 'tx' }, [
+            hA('div', { className: 'ax-connect-board', key: 'b' }, info.board || info.chip),
+            hA('div', { className: 'ax-connect-meta mono', key: 'm' },
+              'via ' + (probe ? probe.name : 'debug probe') + (info.dev_id ? ' · id ' + info.dev_id : '')),
+          ]),
+        ]),
+        info.build && info.build.elf && hA('div', { className: 'ax-connect-build mono', key: 'bd' }, 'build · ' + info.build.elf),
+        hA('button', { className: 'ax-btn primary ax-connect-go', key: 'go', onClick: onConnect }, 'Connect'),
+      ]
+    : info
+      ? [
+          hA('div', { className: 'ax-connect-empty', key: 'e' }, 'Agent running — no board detected.'),
+          hA('div', { className: 'ax-connect-hint', key: 'h' }, 'Plug your board’s USB (its on-board ST-LINK), then retry.'),
+          hA('button', { className: 'ax-btn ghost', key: 'r', onClick: onRetry }, 'Retry'),
+        ]
+      : [
+          hA('div', { className: 'ax-connect-empty', key: 'e' }, 'No Axyr agent detected on this machine.'),
+          hA('div', { className: 'ax-connect-steps', key: 's' }, [
+            hA('div', { className: 'ax-connect-step', key: '1' }, ['1 — install the agent', hA('code', { key: 'c' }, 'curl -fsSL https://get.axyr.dev | sh')]),
+            hA('div', { className: 'ax-connect-step', key: '2' }, ['2 — run it in your firmware project', hA('code', { key: 'c' }, 'axyr')]),
+            hA('div', { className: 'ax-connect-step', key: '3' }, ['3 — reload this page (it will detect your board)']),
+          ]),
+          hA('button', { className: 'ax-btn ghost', key: 'r', onClick: onRetry }, 'Retry'),
+        ];
+  return hA('div', { className: 'ax-connect' },
+    hA('div', { className: 'ax-connect-card' }, [
+      hA('div', { className: 'ax-connect-logo', key: 'lg' }, 'A'),
+      hA('div', { className: 'ax-connect-title', key: 't' }, 'Connect your board'),
+      ...body,
+      hA('button', { className: 'ax-connect-demo', key: 'dm', onClick: onDemo }, 'or explore the demo →'),
+    ]));
+}
+
+function Root() {
+  const [phase, setPhase] = RS('connecting'); // connecting | gate | app
+  const [info, setInfo] = RS(null);
+  const [kick, setKick] = RS(0);
+
+  RE(() => {
+    let alive = true;
+    setPhase('connecting');
+    (async () => {
+      const ci = window.AxLive ? await window.AxLive.connectInfo() : null;
+      if (!alive) return;
+      setInfo(ci);
+      setPhase('gate');
+    })();
+    return () => { alive = false; };
+  }, [kick]);
+
+  const onConnect = async () => {
+    if (window.AxLive) {
+      try { await window.AxLive.hydrate(); window.AxLive.startPolling(); } catch (e) { /* fall through to whatever loaded */ }
+    }
+    setPhase('app');
+  };
+  const onDemo = () => { window.AX_LIVE = false; setPhase('app'); };
+  const onRetry = () => setKick(k => k + 1);
+
+  if (phase === 'connecting') {
+    return hA('div', { className: 'ax-connect' }, hA('div', { className: 'ax-connect-card' }, hA('div', { className: 'ax-connect-spin' })));
+  }
+  if (phase === 'gate') return hA(Connect, { info, onConnect, onDemo, onRetry });
+  return hA(App, null);
+}
+
+window.AxApp = Root;

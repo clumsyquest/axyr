@@ -3,6 +3,12 @@ name = "axyr-engine"
 version = "0.1.0"
 edition = "2024"
 
+# The agent the developer runs: `axyr` (auto-detects probe + build, serves the
+# dashboard API + MCP). Same entrypoint as before; just the friendly name.
+[[bin]]
+name = "axyr"
+path = "src/main.rs"
+
 [dependencies]
 addr2line = "0.26.1"
 gimli = "0.33.0"

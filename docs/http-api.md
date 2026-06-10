@@ -19,6 +19,7 @@ The live index (`GET /`) returns this same list as JSON.
 | Route | Returns |
 | --- | --- |
 | `/` | this endpoint list (JSON) |
+| `/connect` | detected board / probe / build for the dashboard's Connect screen (JSON) |
 | `/snapshot` | the whole system snapshot — the data contract (JSON) |
 | `/graph` | the system as `{board, nodes, edges, disabled}` for the schematic view (JSON) |
 | `/system_map` | the hardware map (text) |

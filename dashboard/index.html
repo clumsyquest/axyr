@@ -27,18 +27,9 @@
 <script src="app/live.js"></script>
 <script src="app/app.js"></script>
 
-<!-- Mount: try the live engine first; fall back to the bundled real demo data. -->
+<!-- Mount: the Connect gate detects the board (or offers the demo) before the cockpit. -->
 <script>
-(async function () {
-  const root = ReactDOM.createRoot(document.getElementById('root'));
-  if (window.AxLive) {
-    try { await window.AxLive.hydrate(); }
-    catch (e) { console.info('Axyr: engine not reachable — showing demo data.', e); }
-  }
-  const render = () => root.render(React.createElement(window.AxApp));
-  render();
-  if (window.AxLive && window.AX_LIVE) window.AxLive.startPolling();
-})();
+  ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(window.AxApp));
 </script>
 </body>
 </html>

@@ -125,6 +125,12 @@
     return mode;
   }
 
+  // What the engine detected (board / probe / build) for the Connect screen,
+  // or null if no agent is reachable.
+  async function connectInfo() {
+    try { return await get('/connect'); } catch (e) { return null; }
+  }
+
   // Fetch /snapshot + /graph + /history and populate the globals before render.
   async function hydrate() {
     const [snap, graph, history] = await Promise.all([
@@ -174,5 +180,5 @@
     return r.text();
   }
 
-  window.AxLive = { base, hydrate, startPolling, action };
+  window.AxLive = { base, connectInfo, hydrate, startPolling, action };
 })();
