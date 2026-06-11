@@ -39,6 +39,20 @@ pub fn strip_ansi(line: &str) -> String {
     out
 }
 
+/// Is this serial line coredump plumbing (a `#CD:` line)? The agent keeps
+/// these out of the human-facing recent-log — hundreds of hex lines would
+/// evict the application output the crash report exists to show.
+pub fn is_dump_line(line: &str) -> bool {
+    strip_ansi(line).contains(PREFIX)
+}
+
+/// Does this line start a new `#CD:` dump? The agent uses this to stop
+/// waiting for a dump that never completed: a new dump beginning while an
+/// older crash still waits means that crash's dump is gone for good.
+pub fn is_dump_begin(line: &str) -> bool {
+    strip_ansi(line).contains(BEGIN_MARKER)
+}
+
 /// Accumulates the `#CD:` coredump block as serial lines stream in.
 ///
 /// Feed every serial line through [`feed`](Self::feed); it returns the captured
@@ -83,6 +97,45 @@ impl CoredumpCollector {
 
         None
     }
+}
+
+/// Decode a captured `#CD:` block (the string [`CoredumpCollector::feed`]
+/// returns) into the raw coredump bytes — the same `ZE…` binary the IN_MEMORY
+/// backend holds in RAM. Zephyr's log backend emits the dump as hex on `#CD:`
+/// lines; BEGIN/END/ERROR marker lines carry no payload and are skipped.
+pub fn block_to_bytes(block: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    for line in block.lines() {
+        let Some(payload) = line.trim().strip_prefix(PREFIX) else { continue };
+        // "#CD:ERROR CANNOT DUMP#": the firmware aborted mid-dump — bytes are
+        // missing and every later offset is shifted, so decoding the rest
+        // would fabricate a plausible-but-wrong dump. Refuse instead.
+        if payload.contains("ERROR") {
+            return Err("firmware reported an incomplete dump (#CD:ERROR)".to_string());
+        }
+        // Markers: "BEGIN#", "END#", …
+        if payload.ends_with('#') {
+            continue;
+        }
+        let hex: String = payload.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        if hex.len() != payload.trim().len() {
+            return Err(format!("coredump line has non-hex payload: {line}"));
+        }
+        // Zephyr emits exactly two hex chars per byte; an odd length means the
+        // UART lost a character and everything after it is byte-shifted.
+        if !hex.len().is_multiple_of(2) {
+            return Err(format!("coredump line has odd hex length: {line}"));
+        }
+        for i in (0..hex.len()).step_by(2) {
+            let byte = u8::from_str_radix(&hex[i..i + 2], 16)
+                .map_err(|e| format!("coredump hex decode: {e}"))?;
+            out.push(byte);
+        }
+    }
+    if out.is_empty() {
+        return Err("coredump block has no payload".to_string());
+    }
+    Ok(out)
 }
 
 /// Paths to the external tools needed to turn a coredump into a backtrace.
@@ -220,6 +273,37 @@ fn path(p: &std::path::Path) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_to_bytes_decodes_hex_and_skips_markers() {
+        let block = "#CD:BEGIN#\n#CD:5a450200\n#CD:0300\n#CD:END#";
+        assert_eq!(block_to_bytes(block).unwrap(), vec![0x5a, 0x45, 0x02, 0x00, 0x03, 0x00]);
+        assert!(block_to_bytes("#CD:BEGIN#\n#CD:END#").is_err()); // no payload
+        assert!(block_to_bytes("#CD:zz").is_err()); // non-hex payload
+    }
+
+    #[test]
+    fn block_to_bytes_refuses_an_aborted_dump() {
+        // The firmware dropped bytes mid-dump: decoding the rest would yield
+        // a byte-shifted, plausible-but-wrong coredump.
+        let block = "#CD:BEGIN#\n#CD:5a450200\n#CD:ERROR CANNOT DUMP#\n#CD:END#";
+        let err = block_to_bytes(block).unwrap_err();
+        assert!(err.contains("incomplete"), "got: {err}");
+    }
+
+    #[test]
+    fn block_to_bytes_refuses_an_odd_length_line() {
+        // A character lost on the UART: the only corruption the non-hex check
+        // can't catch. Must error, not silently drop the trailing nibble.
+        assert!(block_to_bytes("#CD:BEGIN#\n#CD:5a450\n#CD:END#").is_err());
+    }
+
+    #[test]
+    fn dump_lines_are_recognized_for_log_filtering() {
+        assert!(is_dump_line("[00:00:00] <err> coredump: #CD:BEGIN#"));
+        assert!(is_dump_line("\x1b[1;31m<err> coredump: #CD:5a45\x1b[0m"));
+        assert!(!is_dump_line("[00:00:00] <inf> app: sensor read ok"));
+    }
 
     #[test]
     fn strips_ansi_color_codes() {
