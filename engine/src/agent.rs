@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::coredump::{CoredumpTools, resolve_backtrace_from_bin};
+use crate::coredump::{self, CoredumpCollector, CoredumpTools, resolve_backtrace_from_bin};
 use crate::unwind;
 use crate::link::ProbeLink;
 use crate::recent_log::RecentLog;
@@ -121,19 +121,40 @@ pub fn run(
     let mut last_record = record_start;
     let mut line = String::new();
     let mut chunk: Vec<u8> = Vec::new();
+    // Coredumps can also arrive IN the telemetry itself (Zephyr's logging
+    // backend prints them as `#CD:` lines) — the only path on links that can't
+    // read memory (serial). Collect them as they stream by. Zephyr emits the
+    // dump BEFORE the AXYR_CRASH line, and a chunk boundary can fall anywhere
+    // between the two — so both halves persist across cycles and pair up in
+    // arrival order, whichever lands first.
+    let mut collector = CoredumpCollector::new();
+    let mut stream_crash: Option<Crash> = None;
+    let mut pending_dump: Option<String> = None;
 
     loop {
-        // 1. Drain telemetry fully this cycle. A crash is signalled by the
+        // 1. Drain telemetry this cycle. A crash is signalled by the
         //    AXYR_CRASH line; the heavy work happens after the drain. Errors
         //    are transient (the link self-heals internally) — skip the cycle.
         chunk.clear();
-        let mut crash: Option<Crash> = None;
+        let mut events: Vec<StreamEvent> = Vec::new();
         let _ = link.poll_telemetry(&mut chunk);
         for &b in &chunk {
             match b {
                 b'\n' => {
-                    if let Some(c) = process_line(line.trim(), &mut recent_log, &threads) {
-                        crash = Some(c);
+                    let l = line.trim();
+                    if coredump::is_dump_begin(l) {
+                        events.push(StreamEvent::DumpStart);
+                    }
+                    if let Some(block) = collector.feed(l) {
+                        events.push(StreamEvent::Dump(block));
+                    }
+                    // The dump's hex lines are transport plumbing, not output:
+                    // keep them out of the recent-log, or they'd evict the
+                    // application output the crash report exists to show.
+                    if !coredump::is_dump_line(l)
+                        && let Some(c) = process_line(l, &mut recent_log, &threads)
+                    {
+                        events.push(StreamEvent::Crash(c));
                     }
                     line.clear();
                 }
@@ -142,9 +163,49 @@ pub fn run(
             }
         }
 
-        // 2. On a crash, read the coredump from RAM over SWD and write the report.
-        if let Some(crash) = crash {
-            last_crash = report_crash(link.as_mut(), &cfg, coredump_addr, &crash, &recent_log);
+        // 2. Pair each crash with its streamed coredump in arrival order. The
+        //    dump carries its own stack memory, so the call stack needs no
+        //    probe; a crash whose dump hasn't completed yet still gets the
+        //    fast location-only report, upgraded when the dump lands.
+        for event in events {
+            match event {
+                StreamEvent::Crash(crash) => {
+                    let dump = pending_dump.take();
+                    if dump.is_some() {
+                        // This crash's dump already streamed by (the normal
+                        // Zephyr order); any older crash kept waiting is stale.
+                        stream_crash = None;
+                    } else {
+                        stream_crash = Some(crash.clone());
+                    }
+                    last_crash =
+                        report_streamed(link.as_mut(), &cfg, coredump_addr, &crash, &recent_log, dump.as_deref());
+                }
+                StreamEvent::DumpStart => {
+                    // A new dump is starting while an older crash still waits
+                    // for its own: that dump is gone for good (lost mid-stream
+                    // or aborted). Stop waiting — pairing the waiting crash
+                    // with the NEW dump would mix two crashes in one report.
+                    if stream_crash.take().is_some() {
+                        eprintln!(
+                            "agent: a crash's coredump never arrived; its report stays location-only"
+                        );
+                    }
+                }
+                StreamEvent::Dump(block) => match stream_crash.take() {
+                    // The crash line came first (in-memory dumps read later,
+                    // or a reordered stream): upgrade its report now.
+                    Some(crash) => {
+                        last_crash = report_streamed(
+                            link.as_mut(), &cfg, coredump_addr, &crash, &recent_log, Some(&block),
+                        );
+                    }
+                    // Dump first (the normal Zephyr order): hold it for the
+                    // crash line that follows. A newer dump replaces an
+                    // unclaimed older one — its crash line never arrived.
+                    None => pending_dump = Some(block),
+                },
+            }
         }
 
         // 3. Run any queued actions, interleaved between drains. RTT keeps
@@ -212,6 +273,36 @@ pub fn run(
 
 /// Record a telemetry line (recent log + thread state) and, if it is the crash
 /// packet, return the parsed crash.
+/// What the telemetry stream produced, in arrival order — the order is what
+/// lets a dump and its crash line find each other across chunk boundaries.
+enum StreamEvent {
+    Crash(Crash),
+    /// A `#CD:BEGIN#` was seen — a new dump is starting to stream.
+    DumpStart,
+    /// A complete `#CD:` block (BEGIN..END) was captured.
+    Dump(String),
+}
+
+/// Write a crash report, decoding the streamed `#CD:` block when one paired
+/// up. A corrupt block degrades honestly to the location-only report.
+fn report_streamed(
+    link: &mut dyn ProbeLink,
+    cfg: &Config,
+    coredump_addr: Option<u64>,
+    crash: &Crash,
+    recent_log: &RecentLog,
+    block: Option<&str>,
+) -> Option<Value> {
+    let bytes = block.and_then(|b| match coredump::block_to_bytes(b) {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            eprintln!("agent: streamed coredump: {e}");
+            None
+        }
+    });
+    report_crash(link, cfg, coredump_addr, crash, recent_log, bytes.as_deref())
+}
+
 fn process_line(
     line: &str,
     recent_log: &mut RecentLog,
@@ -232,17 +323,22 @@ fn report_crash(
     coredump_addr: Option<u64>,
     crash: &Crash,
     recent_log: &RecentLog,
+    stream_dump: Option<&[u8]>,
 ) -> Option<Value> {
     let location = symbolize(&cfg.elf, &crash.pc);
     let arm = symbols::is_arm(&cfg.elf);
     let mut report = format_report(crash, &location, arm);
 
-    // Read the in-memory coredump (core is halted after the fault) and unwind it.
-    // Native unwinding (gimli over the ELF's DWARF CFI, reading the stack over
-    // SWD) is the primary path, so the engine needs no toolchain at runtime; GDB
-    // is used only as a fallback when it's configured and the native path fails.
+    // Get the coredump: a dump captured from the telemetry stream wins (it
+    // carries its own stack memory, so it needs no probe at all); otherwise
+    // read the IN_MEMORY buffer over the probe (core is halted post-fault).
+    // Native unwinding (gimli over the ELF's DWARF CFI) is the primary path —
+    // no toolchain at runtime; GDB is only a configured fallback.
     let mut backtrace: Option<String> = None;
-    if let Some(addr) = coredump_addr {
+    if let Some(dump) = stream_dump {
+        backtrace = native_backtrace(probe, &cfg.elf, dump)
+            .or_else(|| gdb_backtrace(cfg.coredump.as_ref(), dump));
+    } else if let Some(addr) = coredump_addr {
         match probe.read_coredump(addr) {
             Ok(Some(dump)) => {
                 backtrace = native_backtrace(probe, &cfg.elf, &dump)
@@ -280,14 +376,17 @@ fn report_crash(
     }))
 }
 
-/// Native backtrace: parse registers from the coredump, then unwind via DWARF
-/// CFI, reading stack words over SWD (the core is halted after the fault). No
-/// external toolchain. Returns `None` (with a note) if it can't produce frames.
+/// Native backtrace: parse registers from the coredump, then unwind. Stack
+/// words come from the dump's own memory blocks first (works with no probe at
+/// all — the serial path), over the probe only as a fallback. No external
+/// toolchain. Returns `None` (with a note) if it can't produce frames.
 fn native_backtrace(probe: &mut dyn ProbeLink, elf: &str, dump: &[u8]) -> Option<String> {
     let regs = unwind::parse_registers(dump)
         .map_err(|e| eprintln!("agent: native unwind (registers): {e}"))
         .ok()?;
-    let frames = unwind::backtrace(elf, &regs, |addr| probe.read_word(addr as u64).ok(), 32)
+    let image = unwind::MemoryImage::from_coredump(dump);
+    let read = |addr: u32| image.read_word(addr).or_else(|| probe.read_word(addr as u64).ok());
+    let frames = unwind::backtrace(elf, &regs, read, 32)
         .map_err(|e| eprintln!("agent: native unwind: {e}"))
         .ok()?;
     if frames.is_empty() {

@@ -25,8 +25,9 @@ use axyr_engine::api::{self, Shared};
 use axyr_engine::coredump::CoredumpTools;
 use axyr_engine::probe::{Detection, Probe};
 use axyr_engine::chip as chipid;
-use axyr_engine::link::LocalLink;
+use axyr_engine::link::{LocalLink, ProbeLink};
 use axyr_engine::relay;
+use axyr_engine::serial::{self, SerialLink};
 use axyr_engine::threads::ThreadTable;
 use axyr_engine::system_map;
 use axyr_engine::wire;
@@ -48,7 +49,8 @@ fn main() {
             println!("  the board over the debug probe (chip auto-detected), serves the dashboard");
             println!("  API on 127.0.0.1:7878 and MCP on stdio.");
             println!();
-            println!("environment: AXYR_CHIP, AXYR_DTS, AXYR_SVD, AXYR_HTTP, AXYR_WATCH (see README)");
+            println!("environment: AXYR_CHIP, AXYR_DTS, AXYR_SVD, AXYR_HTTP, AXYR_WATCH,");
+            println!("             AXYR_SERIAL, AXYR_BAUD (serial transport, no probe) — see README");
             return;
         }
         _ => {}
@@ -105,15 +107,55 @@ fn main() {
         }),
         Err(_) => Probe::attach_auto(soc_from_build(&elf).as_deref()),
     };
-    let (mut probe, detection) = attached.unwrap_or_else(|e| {
-        eprintln!("axyr: no debug probe / attach failed ({e}).");
-        eprintln!("  plug your board's USB (its on-board ST-LINK), then run `axyr` again.");
-        eprintln!("  if the chip is exotic, name it explicitly:  AXYR_CHIP=<target> axyr");
-        std::process::exit(1);
-    });
+
+    // No probe (or AXYR_SERIAL set)? Fall back to the board's plain USB serial
+    // port — zero extra hardware. Telemetry, the crash post-mortem (a streamed
+    // `#CD:` coredump carries its own stack memory, so the call stack resolves
+    // probe-free), reset and espflash all work; live memory reads honestly
+    // don't, and say so.
+    let mut serial_link: Option<SerialLink> = None;
+    let attached = match attached {
+        Ok(p) if env::var("AXYR_SERIAL").is_err() => Some(p),
+        probe_result => match serial::detect_port().map(|p| SerialLink::open(&p)) {
+            Some(Ok(link)) => {
+                eprintln!("axyr: using serial port {} (no debug probe)", link.path());
+                serial_link = Some(link);
+                None
+            }
+            Some(Err(e)) => {
+                eprintln!("axyr: serial port found but could not open: {e}");
+                std::process::exit(1);
+            }
+            None => {
+                let e = probe_result
+                    .err()
+                    .unwrap_or_else(|| "AXYR_SERIAL is set but no serial port was found".to_string());
+                eprintln!("axyr: no debug probe / attach failed ({e}), and no serial port either.");
+                eprintln!("  plug your board's USB, then run `axyr` again.");
+                eprintln!("  if the chip is exotic, name it explicitly:  AXYR_CHIP=<target> axyr");
+                eprintln!("  to force a serial port:  AXYR_SERIAL=<port> axyr");
+                std::process::exit(1);
+            }
+        },
+    };
+
+    let (mut probe, detection) = match attached {
+        Some((p, d)) => (Some(p), d),
+        None => {
+            // Serial transport: the chip identity comes from the firmware
+            // build (CONFIG_SOC) — the silicon can't be asked without a probe.
+            let chip = soc_from_build(&elf).unwrap_or_else(|| "unknown".to_string());
+            let port = serial_link.as_ref().map(|l| l.path().to_string()).unwrap_or_default();
+            (None, Detection {
+                chip: chip.clone(),
+                method: format!("from build config (serial {port})"),
+                generic: true,
+            })
+        }
+    };
     let chip = detection.chip.clone();
     // Read the chip identity straight from the silicon (CPUID + STM32 IDCODE).
-    let (cpuid, idcode) = probe.identity();
+    let (cpuid, idcode) = probe.as_mut().map(|p| p.identity()).unwrap_or((None, None));
 
     // Cross-check: does the silicon agree with the chip we attached as? Saves
     // the user from flashing firmware built for another board.
@@ -151,6 +193,10 @@ fn main() {
         .and_then(|s| system_map::model(&s));
     // Dumb-relay mode: hand the probe to the remote engine and stop thinking.
     if let Some(url) = engine_url {
+        let Some(probe) = probe else {
+            eprintln!("axyr: --connect (relay mode) needs a debug probe; serial relay isn't supported yet.");
+            std::process::exit(1);
+        };
         let elf_bytes = fs::read(&elf).unwrap_or_else(|e| {
             eprintln!("axyr: read {elf}: {e}");
             std::process::exit(1);
@@ -179,7 +225,8 @@ fn main() {
     }
 
     let connect = build_connect(
-        &probe_info, &elf, dts.as_deref(), board.as_deref(),
+        &probe_info, serial_link.as_ref().map(|l| l.path()),
+        &elf, dts.as_deref(), board.as_deref(),
         &chip, &detection, mismatch, cpuid, idcode,
     );
 
@@ -195,20 +242,30 @@ fn main() {
     // Shared live thread state: the agent updates it, the MCP front-end reads it.
     let threads = Arc::new(Mutex::new(ThreadTable::new()));
     let threads_agent = threads.clone();
+    let serial_desc = serial_link.as_ref().map(|l| format!("none — serial {}", l.path()));
     thread::spawn(move || {
-        let mut link = LocalLink::new(probe);
-        link.attach_telemetry_blocking();
-        agent::run(Box::new(link), cfg, cmd_rx, threads_agent)
+        let link: Box<dyn ProbeLink> = match (probe, serial_link) {
+            (Some(probe), _) => {
+                let mut link = LocalLink::new(probe);
+                link.attach_telemetry_blocking();
+                Box::new(link)
+            }
+            (None, Some(serial)) => Box::new(serial),
+            (None, None) => unreachable!("either a probe or a serial link exists"),
+        };
+        agent::run(link, cfg, cmd_rx, threads_agent)
     });
 
     // Friendly startup banner — what we detected, and where the dashboard is.
     eprintln!("axyr — agent ready");
     eprintln!(
         "  probe : {}",
-        probe_info
-            .as_ref()
-            .map(|(n, s)| format!("{n}{}", s.as_ref().map(|x| format!(" · {x}")).unwrap_or_default()))
-            .unwrap_or_else(|| "?".to_string())
+        serial_desc.unwrap_or_else(|| {
+            probe_info
+                .as_ref()
+                .map(|(n, s)| format!("{n}{}", s.as_ref().map(|x| format!(" · {x}")).unwrap_or_default()))
+                .unwrap_or_else(|| "?".to_string())
+        })
     );
     eprintln!("  board : {}", board.as_deref().unwrap_or(&chip));
     eprintln!("  chip  : {chip} — {}", detection.method);
@@ -287,6 +344,7 @@ fn soc_from_build(elf: &str) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 fn build_connect(
     probe: &Option<(String, Option<String>)>,
+    serial_port: Option<&str>,
     elf: &str,
     dts: Option<&str>,
     board: Option<&str>,
@@ -298,6 +356,9 @@ fn build_connect(
 ) -> String {
     json!({
         "probe": probe.as_ref().map(|(n, s)| json!({ "name": n, "serial": s })),
+        // The serial transport, when there is no probe (telemetry + streamed
+        // crash post-mortem + reset + espflash; no live memory reads).
+        "serial_port": serial_port,
         "board": board,
         "chip": chip,
         "detection": detection.method,
@@ -308,7 +369,7 @@ fn build_connect(
         "cpuid": cpuid.map(|c| format!("{c:#010x}")),
         "dev_id": idcode.map(|c| format!("{:#05x}", c & 0xfff)),
         "build": { "elf": elf, "dts": dts },
-        "ready": probe.is_some(),
+        "ready": probe.is_some() || serial_port.is_some(),
     })
     .to_string()
 }

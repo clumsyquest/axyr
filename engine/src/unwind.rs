@@ -209,6 +209,78 @@ fn parse_riscv_arch(
     Ok(())
 }
 
+/// The memory the coredump carries (its `'M'` blocks — typically the faulting
+/// thread's stack). Lets the unwinder read stack words straight from the dump,
+/// so a backtrace needs NO live probe access — the path for transports that
+/// can't read memory (serial) and for offline analysis.
+pub struct MemoryImage {
+    /// (start address, bytes) per region. A truncated trailing region keeps
+    /// whatever bytes actually arrived.
+    regions: Vec<(u32, Vec<u8>)>,
+}
+
+impl MemoryImage {
+    /// Index the `'M'` blocks of a Zephyr coredump. Tolerates truncation (a
+    /// dump cut mid-stream still serves the words it has).
+    pub fn from_coredump(dump: &[u8]) -> Self {
+        let mut regions = Vec::new();
+        // Header byte 6 is ptr_size_bits (log2 of the pointer width): the
+        // M-block walk below hard-codes the 32-bit (11-byte) header layout,
+        // so refuse 64-bit dumps rather than indexing garbage as memory.
+        if dump.len() < 12 || &dump[0..2] != b"ZE" || dump[6] != 5 {
+            return Self { regions };
+        }
+        let rd16 = |o: usize| u16::from_le_bytes([dump[o], dump[o + 1]]);
+        let rd32 = |o: usize| u32::from_le_bytes([dump[o], dump[o + 1], dump[o + 2], dump[o + 3]]);
+        let mut off = 12;
+        while off < dump.len() {
+            match dump[off] {
+                b'A' => {
+                    if off + 5 > dump.len() {
+                        break;
+                    }
+                    off += 5 + rd16(off + 3) as usize;
+                }
+                b'M' => {
+                    // <cH> + <II> (start, end) + payload
+                    if off + 11 > dump.len() {
+                        break;
+                    }
+                    let start = rd32(off + 3);
+                    let end = rd32(off + 7);
+                    let len = end.saturating_sub(start) as usize;
+                    let data = off + 11;
+                    let have = len.min(dump.len().saturating_sub(data));
+                    if have > 0 {
+                        regions.push((start, dump[data..data + have].to_vec()));
+                    }
+                    off = data + len;
+                }
+                b'T' => {
+                    if off + 5 > dump.len() {
+                        break;
+                    }
+                    off += 5 + rd16(off + 3) as usize;
+                }
+                _ => break,
+            }
+        }
+        Self { regions }
+    }
+
+    /// The 32-bit word at `addr`, if the dump contains it.
+    pub fn read_word(&self, addr: u32) -> Option<u32> {
+        for (start, data) in &self.regions {
+            if let Some(o) = addr.checked_sub(*start).map(|d| d as usize)
+                && o + 4 <= data.len()
+            {
+                return Some(u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]));
+            }
+        }
+        None
+    }
+}
+
 /// Decode the Xtensa arch block (Zephyr arch/xtensa/core/coredump.c):
 /// soc(u8) version(u16) toolchain(u8), then pc, exccause, excvaddr, sar, ps,
 /// [scompare1], a0..a15, [lbeg/lend/lcount] — the optional fields depend on
@@ -542,5 +614,16 @@ mod tests {
     #[test]
     fn rejects_non_coredump() {
         assert!(parse_registers(b"not a dump").is_err());
+    }
+
+    #[test]
+    fn memory_image_serves_the_dumps_own_stack() {
+        // The real dump's M block: 192 bytes declared at 0x200006e8, of which
+        // the fixture carries the first 24 — truncation must be tolerated.
+        let img = MemoryImage::from_coredump(&decode(DUMP_HEX));
+        assert_eq!(img.read_word(0x2000_06e8), Some(0x2000_0558));
+        assert_eq!(img.read_word(0x2000_06e8 + 4), Some(0x2000_07c8));
+        assert_eq!(img.read_word(0x2000_06e8 + 24), None); // past the fixture's bytes
+        assert_eq!(img.read_word(0x1000_0000), None); // outside any region
     }
 }

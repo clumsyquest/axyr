@@ -12,6 +12,7 @@ pub mod peripheral;
 pub mod probe;
 pub mod recent_log;
 pub mod rtt;
+pub mod serial;
 pub mod symbols;
 pub mod threads;
 pub mod system_map;
@@ -19,6 +20,7 @@ pub mod trace;
 pub mod unwind;
 
 /// A crash captured from the device.
+#[derive(Clone)]
 pub struct Crash {
     pub reason: Option<u32>,
     pub pc: String,
