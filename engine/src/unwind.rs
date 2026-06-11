@@ -38,6 +38,9 @@ pub enum Arch {
     /// Zephyr target code 4 (32-bit). DWARF regs x0..x31; sp = x2 (2),
     /// ra = x1 (1); the PC is not a DWARF register.
     RiscV,
+    /// Zephyr target code 5. Windowed ABI: regs a0..a15 (DWARF 0..15),
+    /// sp = a1 (1). Unwinds via the window spill areas, not DWARF CFI.
+    Xtensa,
 }
 
 impl Arch {
@@ -46,13 +49,14 @@ impl Arch {
         match self {
             Arch::ArmCortexM => 13,
             Arch::RiscV => 2,
+            Arch::Xtensa => 1,
         }
     }
     /// Mask applied to recovered return addresses (ARM: clear the Thumb bit).
     fn ret_mask(self) -> u32 {
         match self {
             Arch::ArmCortexM => !1,
-            Arch::RiscV => !0,
+            Arch::RiscV | Arch::Xtensa => !0,
         }
     }
 }
@@ -90,6 +94,7 @@ pub fn parse_registers(dump: &[u8]) -> Result<Registers, String> {
     let arch = match rd16(4) {
         3 => Arch::ArmCortexM,
         4 => Arch::RiscV,
+        5 => Arch::Xtensa,
         other => {
             return Err(format!(
                 "coredump target code {other} — unwinding not implemented for this architecture yet"
@@ -117,6 +122,7 @@ pub fn parse_registers(dump: &[u8]) -> Result<Registers, String> {
                 match arch {
                     Arch::ArmCortexM => parse_arm_arch(&dump[data..data + num], ver, &mut regs, &mut pc)?,
                     Arch::RiscV => parse_riscv_arch(&dump[data..data + num], ver, &mut regs, &mut pc)?,
+                    Arch::Xtensa => parse_xtensa_arch(&dump[data..data + num], &mut regs, &mut pc)?,
                 }
                 off = data + num;
             }
@@ -203,6 +209,38 @@ fn parse_riscv_arch(
     Ok(())
 }
 
+/// Decode the Xtensa arch block (Zephyr arch/xtensa/core/coredump.c):
+/// soc(u8) version(u16) toolchain(u8), then pc, exccause, excvaddr, sar, ps,
+/// [scompare1], a0..a15, [lbeg/lend/lcount] — the optional fields depend on
+/// the core's options, resolved here from the block size (21/22/24/25 words;
+/// ESP32 = 25). a0..a15 land in DWARF slots 0..15.
+fn parse_xtensa_arch(
+    data: &[u8],
+    regs: &mut [Option<u32>; 32],
+    pc: &mut Option<u32>,
+) -> Result<(), String> {
+    if data.len() < 4 + 21 * 4 {
+        return Err("Xtensa arch block too short".to_string());
+    }
+    let words = (data.len() - 4) / 4;
+    let has_scompare1 = match words {
+        21 | 24 => false,
+        22 | 25 => true,
+        _ => return Err(format!("Xtensa arch block has {words} words — unknown layout")),
+    };
+    let w = |i: usize| {
+        let o = 4 + i * 4;
+        u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]])
+    };
+    *pc = Some(w(0));
+    // w(1) exccause, w(2) excvaddr, w(3) sar, w(4) ps — not needed to unwind.
+    let a0 = 5 + has_scompare1 as usize;
+    for i in 0..16 {
+        regs[i] = Some(w(a0 + i));
+    }
+    Ok(())
+}
+
 /// Unwind the call stack from the faulting registers, reading stack memory via
 /// `read_word` (returns the 32-bit word at an address, or `None` if unreadable).
 /// Frames are symbolized with `addr2line`. Stops at the first unrecoverable
@@ -213,6 +251,12 @@ pub fn backtrace(
     mut read_word: impl FnMut(u32) -> Option<u32>,
     max_frames: usize,
 ) -> Result<Vec<Frame>, String> {
+    // Windowed Xtensa doesn't unwind through DWARF CFI: the hardware's window
+    // spill mechanism defines where the caller's state lives. Dedicated walk.
+    if start.arch == Arch::Xtensa {
+        return xtensa_backtrace(elf, start, read_word, max_frames);
+    }
+
     let data = std::fs::read(elf).map_err(|e| format!("read elf {elf}: {e}"))?;
     let file = object::File::parse(&*data).map_err(|e| format!("parse elf: {e}"))?;
     let section = file
@@ -300,6 +344,57 @@ pub fn backtrace(
             next[15] = pc_reg; // on ARM the PC is also DWARF reg 15
         }
         regs = next;
+    }
+
+    Ok(frames)
+}
+
+/// Xtensa windowed-ABI backtrace. The window overflow mechanism spills the
+/// caller's a0 (return address) and a1 (stack pointer) into the 16-byte base
+/// save area just below each frame's SP — so the walk is `ra = *(sp-16)`,
+/// `prev sp = *(sp-12)`, seeded from the dump's a0/a1 (the same walk ESP-IDF's
+/// panic handler uses; Zephyr spills the windows on a fatal error). A windowed
+/// return address only carries 30 bits; the segment comes from the current PC.
+fn xtensa_backtrace(
+    elf: &str,
+    start: &Registers,
+    mut read_word: impl FnMut(u32) -> Option<u32>,
+    max_frames: usize,
+) -> Result<Vec<Frame>, String> {
+    let loader = Loader::new(elf).map_err(|e| format!("symbolizer: {e}"))?;
+    let (Some(pc0), Some(a0), Some(sp0)) = (start.pc, start.regs[0], start.regs[1]) else {
+        return Err("Xtensa coredump lacks pc/a0/a1".to_string());
+    };
+
+    let mut frames = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut pc = pc0;
+    let mut next_ra = a0; // return address that leads OUT of the current frame
+    let mut sp = sp0;
+
+    'walk: for depth in 0..max_frames {
+        let sym_addr = if depth == 0 { pc } else { pc.wrapping_sub(1) };
+        for frame in frames_at(&loader, pc, sym_addr) {
+            let is_main = frame.func == "main";
+            frames.push(frame);
+            if is_main {
+                break 'walk;
+            }
+        }
+        if !seen.insert(pc) {
+            break;
+        }
+        if next_ra == 0 || sp == 0 || sp & 3 != 0 {
+            break;
+        }
+        pc = (next_ra & 0x3FFF_FFFF) | (pc & 0xC000_0000);
+        let (Some(ra), Some(prev_sp)) =
+            (read_word(sp.wrapping_sub(16)), read_word(sp.wrapping_sub(12)))
+        else {
+            break;
+        };
+        next_ra = ra;
+        sp = prev_sp;
     }
 
     Ok(frames)
@@ -400,12 +495,46 @@ mod tests {
         assert_eq!(regs.regs[31], Some(0x1000_001f)); // t6 = x31
     }
 
+    /// A synthetic ESP32 coredump: ZE header (tgt 5) + Xtensa arch block with
+    /// the full 25-word ESP32 layout (scompare1 + loop registers).
+    #[test]
+    fn parses_xtensa_registers() {
+        let mut d = Vec::new();
+        d.extend_from_slice(b"ZE");
+        d.extend_from_slice(&2u16.to_le_bytes());
+        d.extend_from_slice(&5u16.to_le_bytes()); // target: Xtensa
+        d.push(5);
+        d.push(0);
+        d.extend_from_slice(&0u32.to_le_bytes());
+        d.push(b'A');
+        d.extend_from_slice(&1u16.to_le_bytes()); // ARCH_HDR_VER = 1
+        d.extend_from_slice(&(4u16 + 25 * 4).to_le_bytes()); // soc hdr + 25 words
+        d.push(2); // soc: ESP32
+        d.extend_from_slice(&2u16.to_le_bytes()); // block version
+        d.push(0); // toolchain
+        let words: Vec<u32> = std::iter::once(0x400d_1234) // pc
+            .chain([13u32, 0xdead_0000, 7, 0x0003_0000]) // exccause, excvaddr, sar, ps
+            .chain(std::iter::once(0)) // scompare1
+            .chain((0..16).map(|i| 0x3ffb_0000 + i)) // a0..a15
+            .chain([0, 0, 0]) // lbeg, lend, lcount
+            .collect();
+        for v in words {
+            d.extend_from_slice(&v.to_le_bytes());
+        }
+        let regs = parse_registers(&d).unwrap();
+        assert_eq!(regs.arch, Arch::Xtensa);
+        assert_eq!(regs.pc, Some(0x400d_1234));
+        assert_eq!(regs.regs[0], Some(0x3ffb_0000)); // a0
+        assert_eq!(regs.regs[1], Some(0x3ffb_0001)); // a1 = sp
+        assert_eq!(regs.regs[15], Some(0x3ffb_000f)); // a15
+    }
+
     #[test]
     fn refuses_unknown_target_instead_of_guessing() {
-        // Same header but target code 5 (Xtensa): must refuse, never decode
+        // Same header but target code 6 (ARM64): must refuse, never decode
         // with another architecture's table.
         let mut d = riscv_dump();
-        d[4] = 5;
+        d[4] = 6;
         let err = parse_registers(&d).unwrap_err();
         assert!(err.contains("not implemented"), "{err}");
     }
