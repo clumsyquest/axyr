@@ -20,15 +20,18 @@ say()  { printf '%s\n' "$*" >&2; }
 fail() { say "axyr install: error: $*"; exit 1; }
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
-command -v tar  >/dev/null 2>&1 || fail "tar is required"
 
 # --- platform -----------------------------------------------------------
 os=$(uname -s)
 arch=$(uname -m)
+windows=""
 case "$os" in
   Linux)  os="unknown-linux-gnu" ;;
   Darwin) os="apple-darwin" ;;
-  *) fail "unsupported OS: $os (Linux and macOS for now; on Windows, use WSL)" ;;
+  # Git Bash / MSYS2 / Cygwin: install the native Windows binary right here.
+  # (Native PowerShell users: see install.ps1 in the repo.)
+  MINGW*|MSYS*|CYGWIN*) windows=1; os="pc-windows-msvc" ;;
+  *) fail "unsupported OS: $os (Linux, macOS and Windows)" ;;
 esac
 case "$arch" in
   x86_64|amd64)  arch="x86_64" ;;
@@ -36,7 +39,14 @@ case "$arch" in
   *) fail "unsupported architecture: $arch" ;;
 esac
 target="$arch-$os"
-asset="axyr-$target.tar.gz"
+if [ -n "$windows" ]; then
+  asset="axyr-$target.zip"
+  bin="axyr.exe"
+else
+  command -v tar >/dev/null 2>&1 || fail "tar is required"
+  asset="axyr-$target.tar.gz"
+  bin="axyr"
+fi
 
 # --- download + verify ---------------------------------------------------
 if [ "$VERSION" = "latest" ]; then
@@ -65,14 +75,25 @@ expected=$(grep " $asset\$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
 [ "$sum" = "$expected" ] || fail "checksum mismatch for $asset (got $sum, expected $expected)"
 
 # --- install -------------------------------------------------------------
-tar -xzf "$tmp/$asset" -C "$tmp"
+if [ -n "$windows" ]; then
+  # Git Bash usually ships unzip; PowerShell's Expand-Archive is the fallback.
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -oq "$tmp/$asset" -d "$tmp"
+  else
+    powershell.exe -NoProfile -Command \
+      "Expand-Archive -Force -LiteralPath '$(cygpath -w "$tmp/$asset")' -DestinationPath '$(cygpath -w "$tmp")'" \
+      || fail "could not extract $asset (need unzip or PowerShell)"
+  fi
+else
+  tar -xzf "$tmp/$asset" -C "$tmp"
+fi
 mkdir -p "$INSTALL_DIR"
-install -m 755 "$tmp/axyr" "$INSTALL_DIR/axyr" 2>/dev/null \
-  || { cp "$tmp/axyr" "$INSTALL_DIR/axyr" && chmod 755 "$INSTALL_DIR/axyr"; }
+install -m 755 "$tmp/$bin" "$INSTALL_DIR/$bin" 2>/dev/null \
+  || { cp "$tmp/$bin" "$INSTALL_DIR/$bin" && chmod 755 "$INSTALL_DIR/$bin"; }
 
-installed_version=$("$INSTALL_DIR/axyr" --version 2>/dev/null) \
-  || fail "installed binary failed to run ($INSTALL_DIR/axyr --version)"
-say "installed $installed_version -> $INSTALL_DIR/axyr"
+installed_version=$("$INSTALL_DIR/$bin" --version 2>/dev/null) \
+  || fail "installed binary failed to run ($INSTALL_DIR/$bin --version)"
+say "installed $installed_version -> $INSTALL_DIR/$bin"
 
 # --- post-install hints ---------------------------------------------------
 case ":$PATH:" in

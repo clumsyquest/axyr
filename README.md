@@ -7,17 +7,25 @@ Debugging embedded systems often means flying blind: a board reboots, a HardFaul
 
 ## Install
 
+Linux, macOS, **and Git Bash on Windows**:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/clumsyquest/axyr/main/install.sh | sh
 ```
 
-Linux (x86_64 / aarch64) and macOS (Intel / Apple Silicon). The script downloads
-the latest [release](https://github.com/clumsyquest/axyr/releases), verifies its
-checksum, and installs `axyr` to `~/.local/bin` — no sudo. On Windows, download
-`axyr-x86_64-pc-windows-msvc.zip` from the
-[releases page](https://github.com/clumsyquest/axyr/releases) (or use WSL; the
-board's ST-LINK needs the usual ST USB driver). Then, from your Zephyr project,
-with the board plugged in:
+Windows (native PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/clumsyquest/axyr/main/install.ps1 | iex
+```
+
+Linux (x86_64 / aarch64), macOS (Intel / Apple Silicon) and Windows (x86_64).
+The script downloads the latest
+[release](https://github.com/clumsyquest/axyr/releases), verifies its checksum,
+and installs `axyr` to `~/.local/bin` (Windows:
+`%LOCALAPPDATA%\Programs\axyr`) — no sudo, no admin. (On Windows the board's
+ST-LINK needs the usual ST USB driver.) Then, from your Zephyr project, with
+the board plugged in:
 
 ```bash
 axyr
