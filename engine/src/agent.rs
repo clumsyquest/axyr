@@ -234,7 +234,8 @@ fn report_crash(
     recent_log: &RecentLog,
 ) -> Option<Value> {
     let location = symbolize(&cfg.elf, &crash.pc);
-    let mut report = format_report(crash, &location);
+    let arm = symbols::is_arm(&cfg.elf);
+    let mut report = format_report(crash, &location, arm);
 
     // Read the in-memory coredump (core is halted after the fault) and unwind it.
     // Native unwinding (gimli over the ELF's DWARF CFI, reading the stack over
@@ -269,7 +270,7 @@ fn report_crash(
 
     // Structured form for the snapshot contract.
     Some(json!({
-        "cause": crash.reason.map(reason_label).unwrap_or("Unknown reason"),
+        "cause": crash.reason.map(|r| reason_label(r, arm)).unwrap_or("Unknown reason"),
         "reason_code": crash.reason,
         "fault_address": fault_address(&telemetry),
         "location": parse_location(&location),
@@ -477,11 +478,12 @@ fn read_timeline(probe: &mut dyn ProbeLink, elf: &str) -> Option<Value> {
     probe.read_words(ring.address, &mut raw).ok()?;
     let idxs = trace::ordered_indices(head_val);
     let t0 = idxs.first().map(|&i| raw[i * 2]).unwrap_or(0);
+    let ram = symbols::ram_ranges(elf).unwrap_or_default();
     let mut arr = Vec::new();
     for i in idxs {
         let ts = raw[i * 2];
         let name_ptr = raw[i * 2 + 1] as u64;
-        let thread = if (0x2000_0000..0x2002_0000).contains(&name_ptr) {
+        let thread = if ram.iter().any(|r| r.contains(&name_ptr)) {
             probe.read_cstring(name_ptr, 24).unwrap_or_default()
         } else {
             String::new()
@@ -623,12 +625,13 @@ fn execute(
             let head_val = probe.read_word(head.address)?;
             let mut raw = vec![0u32; trace::RING_SLOTS * 2];
             probe.read_words(ring.address, &mut raw)?;
+            let ram = symbols::ram_ranges(elf).unwrap_or_default();
             let mut entries = Vec::new();
             for idx in trace::ordered_indices(head_val) {
                 let ts = raw[idx * 2];
                 let name_ptr = raw[idx * 2 + 1] as u64;
                 // Names live in RAM; read the string, else show the raw pointer.
-                let thread = if (0x2000_0000..0x2002_0000).contains(&name_ptr) {
+                let thread = if ram.iter().any(|r| r.contains(&name_ptr)) {
                     probe
                         .read_cstring(name_ptr, 24)
                         .unwrap_or_else(|_| format!("{name_ptr:#010x}"))

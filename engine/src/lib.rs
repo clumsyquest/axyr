@@ -58,9 +58,10 @@ pub fn symbolize(elf: &str, pc: &str) -> String {
     }
 }
 
-/// Build the human-readable crash report.
-pub fn format_report(crash: &Crash, location: &str) -> String {
-    let cause = crash.reason.map(reason_label).unwrap_or("Unknown reason");
+/// Build the human-readable crash report. `arm` says whether the firmware
+/// targets ARM (see [`reason_label`]).
+pub fn format_report(crash: &Crash, location: &str, arm: bool) -> String {
+    let cause = crash.reason.map(|r| reason_label(r, arm)).unwrap_or("Unknown reason");
     let reason_str = crash
         .reason
         .map(|r| r.to_string())
@@ -69,9 +70,12 @@ pub fn format_report(crash: &Crash, location: &str) -> String {
 }
 
 /// Translate a Zephyr fatal-error reason code into a human-readable cause.
-/// Generic reasons (0..=4): include/zephyr/fatal_types.h.
-/// ARM Cortex-M arch reasons (start at K_ERR_ARCH_START = 16): include/zephyr/arch/arm/arch.h.
-pub fn reason_label(reason: u32) -> &'static str {
+/// Generic reasons (0..=4): include/zephyr/fatal_types.h — valid on every
+/// architecture. Codes from K_ERR_ARCH_START (16) up are defined PER
+/// architecture; the tables below are ARM's (include/zephyr/arch/arm/arch.h),
+/// so they only apply when `arm` is true — an honest "not decoded" beats a
+/// wrong ARM fault name on another architecture.
+pub fn reason_label(reason: u32, arm: bool) -> &'static str {
     match reason {
         // Generic kernel reasons
         0 => "Generic CPU exception",
@@ -79,6 +83,8 @@ pub fn reason_label(reason: u32) -> &'static str {
         2 => "Stack buffer overflow",
         3 => "Kernel oops (software error)",
         4 => "Kernel panic (fatal software error)",
+
+        _ if !arm => "Architecture-specific fault (not decoded for this architecture yet)",
 
         // ARM Cortex-M — MemManage faults (MPU)
         16 => "Memory protection fault (generic)",
@@ -125,12 +131,22 @@ mod tests {
 
     #[test]
     fn decodes_precise_bus_fault() {
-        assert_eq!(reason_label(25), "Bus fault: invalid memory access (precise)");
+        assert_eq!(reason_label(25, true), "Bus fault: invalid memory access (precise)");
     }
 
     #[test]
     fn unknown_reason_is_handled() {
-        assert_eq!(reason_label(999), "Unknown reason");
+        assert_eq!(reason_label(999, true), "Unknown reason");
+    }
+
+    #[test]
+    fn never_applies_arm_fault_names_off_arm() {
+        // Generic kernel codes still decode; ARM-specific ones must not.
+        assert_eq!(reason_label(2, false), "Stack buffer overflow");
+        assert_eq!(
+            reason_label(25, false),
+            "Architecture-specific fault (not decoded for this architecture yet)"
+        );
     }
 
     #[test]
