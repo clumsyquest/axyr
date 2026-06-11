@@ -50,6 +50,15 @@ pub fn parse_registers(dump: &[u8]) -> Result<Registers, String> {
     }
     let rd32 = |o: usize| u32::from_le_bytes([dump[o], dump[o + 1], dump[o + 2], dump[o + 3]]);
     let rd16 = |o: usize| u16::from_le_bytes([dump[o], dump[o + 1]]);
+    // The header's target code says which architecture's register layout the
+    // arch block uses (coredump.h: 3 = ARM Cortex-M). Decoding any other as ARM
+    // would fabricate a plausible-but-wrong backtrace — refuse instead.
+    let tgt = rd16(4);
+    if tgt != 3 {
+        return Err(format!(
+            "coredump target code {tgt} is not ARM Cortex-M (3) — unwinding not implemented for this architecture yet"
+        ));
+    }
     let reason = rd32(8);
 
     let mut regs = [None; 16];
