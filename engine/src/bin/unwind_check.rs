@@ -19,10 +19,9 @@ fn main() {
     let dump = std::fs::read(&args[2]).expect("read coredump");
     let regs = unwind::parse_registers(&dump).expect("parse registers");
     eprintln!(
-        "registers: pc={:#010x} sp={:#010x} lr={:#010x} reason={}",
-        regs.regs[15].unwrap_or(0),
-        regs.regs[13].unwrap_or(0),
-        regs.regs[14].unwrap_or(0),
+        "registers: arch={:?} pc={:#010x} reason={}",
+        regs.arch,
+        regs.pc.unwrap_or(0),
         regs.reason
     );
 
