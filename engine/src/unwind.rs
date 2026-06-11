@@ -5,8 +5,11 @@
 //! a dev box but makes the engine depend on a toolchain at runtime, which blocks
 //! a self-contained cloud binary. This module replaces it in pure Rust:
 //!
-//!   1. [`parse_registers`] reads the Zephyr coredump header + ARM arch block to
-//!      recover the faulting CPU registers (PC/SP/LR + callee-saved).
+//!   1. [`parse_registers`] reads the Zephyr coredump header + arch block to
+//!      recover the faulting CPU registers (PC/SP/RA + callee-saved). The header
+//!      names the target architecture; ARM Cortex-M and RISC-V (32-bit) blocks
+//!      are decoded, anything else is refused (never decoded with the wrong
+//!      table).
 //!   2. [`backtrace`] walks the stack using the ELF's DWARF call-frame info
 //!      (`.debug_frame`, via `gimli`), reading stack words through a caller-
 //!      supplied closure — backed by SWD reads of the halted core (the stack is
@@ -16,7 +19,8 @@
 //! The coredump binary format is Zephyr's own (subsys/debug/coredump): a
 //! `<ccHHBBI>` header (`ZE`, version, target, ptr-size, flags, reason) followed
 //! by typed blocks — `'A'` arch registers, `'M'` memory regions, `'T'` thread
-//! metadata. The ARM Cortex-M register order matches Zephyr's gdbstub parser.
+//! metadata. Register orders match Zephyr's gdbstub parsers (`arm_cortex_m.py`,
+//! `risc_v.py`).
 
 use addr2line::Loader;
 use gimli::{
@@ -24,10 +28,43 @@ use gimli::{
 };
 use object::{Object, ObjectSection};
 
-/// Recovered CPU registers: r0..r12, sp (13), lr (14), pc (15). `None` = not in
-/// the dump.
+/// The coredump's target architecture (header target code), driving the
+/// register conventions used during unwinding.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Arch {
+    /// Zephyr target code 3. DWARF regs r0..r15; sp = 13, pc = 15; return
+    /// addresses carry the Thumb bit.
+    ArmCortexM,
+    /// Zephyr target code 4 (32-bit). DWARF regs x0..x31; sp = x2 (2),
+    /// ra = x1 (1); the PC is not a DWARF register.
+    RiscV,
+}
+
+impl Arch {
+    /// The DWARF register number that holds the stack pointer.
+    fn sp_dwarf(self) -> usize {
+        match self {
+            Arch::ArmCortexM => 13,
+            Arch::RiscV => 2,
+        }
+    }
+    /// Mask applied to recovered return addresses (ARM: clear the Thumb bit).
+    fn ret_mask(self) -> u32 {
+        match self {
+            Arch::ArmCortexM => !1,
+            Arch::RiscV => !0,
+        }
+    }
+}
+
+/// Recovered CPU registers, indexed by DWARF register number (ARM: r0..r15,
+/// RISC-V: x0..x31). `None` = not in the dump. The PC is tracked separately —
+/// on RISC-V it is not a DWARF register.
+#[derive(Debug)]
 pub struct Registers {
-    pub regs: [Option<u32>; 16],
+    pub arch: Arch,
+    pub regs: [Option<u32>; 32],
+    pub pc: Option<u32>,
     /// The Zephyr fatal-error reason code from the coredump header.
     pub reason: u32,
 }
@@ -40,10 +77,7 @@ pub struct Frame {
     pub line: u32,
 }
 
-const SP: usize = 13;
-const PC: usize = 15;
-
-/// Parse the Zephyr coredump header and ARM arch block into CPU registers.
+/// Parse the Zephyr coredump header and arch block into CPU registers.
 pub fn parse_registers(dump: &[u8]) -> Result<Registers, String> {
     if dump.len() < 12 || &dump[0..2] != b"ZE" {
         return Err("not a Zephyr coredump (bad magic)".to_string());
@@ -51,17 +85,21 @@ pub fn parse_registers(dump: &[u8]) -> Result<Registers, String> {
     let rd32 = |o: usize| u32::from_le_bytes([dump[o], dump[o + 1], dump[o + 2], dump[o + 3]]);
     let rd16 = |o: usize| u16::from_le_bytes([dump[o], dump[o + 1]]);
     // The header's target code says which architecture's register layout the
-    // arch block uses (coredump.h: 3 = ARM Cortex-M). Decoding any other as ARM
-    // would fabricate a plausible-but-wrong backtrace — refuse instead.
-    let tgt = rd16(4);
-    if tgt != 3 {
-        return Err(format!(
-            "coredump target code {tgt} is not ARM Cortex-M (3) — unwinding not implemented for this architecture yet"
-        ));
-    }
+    // arch block uses (coredump.h). Decoding an unknown one with a known
+    // table would fabricate a plausible-but-wrong backtrace — refuse instead.
+    let arch = match rd16(4) {
+        3 => Arch::ArmCortexM,
+        4 => Arch::RiscV,
+        other => {
+            return Err(format!(
+                "coredump target code {other} — unwinding not implemented for this architecture yet"
+            ));
+        }
+    };
     let reason = rd32(8);
 
-    let mut regs = [None; 16];
+    let mut regs = [None; 32];
+    let mut pc = None;
     let mut off = 12; // past the fixed header
     while off < dump.len() {
         match dump[off] {
@@ -76,7 +114,10 @@ pub fn parse_registers(dump: &[u8]) -> Result<Registers, String> {
                 if data + num > dump.len() {
                     return Err("coredump arch block truncated".to_string());
                 }
-                parse_arm_arch(&dump[data..data + num], ver, &mut regs)?;
+                match arch {
+                    Arch::ArmCortexM => parse_arm_arch(&dump[data..data + num], ver, &mut regs, &mut pc)?,
+                    Arch::RiscV => parse_riscv_arch(&dump[data..data + num], ver, &mut regs, &mut pc)?,
+                }
                 off = data + num;
             }
             b'M' => {
@@ -100,16 +141,21 @@ pub fn parse_registers(dump: &[u8]) -> Result<Registers, String> {
         }
     }
 
-    if regs[PC].is_none() {
-        return Err("coredump has no PC (no ARM arch block?)".to_string());
+    if pc.is_none() {
+        return Err("coredump has no PC (no arch block?)".to_string());
     }
-    Ok(Registers { regs, reason })
+    Ok(Registers { arch, regs, pc, reason })
 }
 
 /// Decode the ARM Cortex-M arch register block. Order (matching Zephyr's
 /// `arm_cortex_m.py`): r0,r1,r2,r3,r12,lr,pc,xpsr,sp, then (v2+) r4..r11, then
 /// (v3+) callee-saved valid+offset (ignored — r4..r11 are inline).
-fn parse_arm_arch(data: &[u8], ver: u16, regs: &mut [Option<u32>; 16]) -> Result<(), String> {
+fn parse_arm_arch(
+    data: &[u8],
+    ver: u16,
+    regs: &mut [Option<u32>; 32],
+    pc: &mut Option<u32>,
+) -> Result<(), String> {
     let min_words = if ver <= 1 { 9 } else { 17 };
     if data.len() < min_words * 4 {
         return Err(format!("ARM arch block too short for v{ver}"));
@@ -121,7 +167,8 @@ fn parse_arm_arch(data: &[u8], ver: u16, regs: &mut [Option<u32>; 16]) -> Result
     regs[3] = Some(w(3));
     regs[12] = Some(w(4));
     regs[14] = Some(w(5)); // lr
-    regs[15] = Some(w(6)); // pc
+    regs[15] = Some(w(6)); // pc (DWARF reg 15 on ARM)
+    *pc = Some(w(6));
     // w(7) = xpsr (not tracked)
     regs[13] = Some(w(8)); // sp
     if ver > 1 {
@@ -129,6 +176,30 @@ fn parse_arm_arch(data: &[u8], ver: u16, regs: &mut [Option<u32>; 16]) -> Result
             regs[slot] = Some(w(idx));
         }
     }
+    Ok(())
+}
+
+/// Decode the RISC-V arch register block. Order (matching Zephyr's
+/// `risc_v.py` / arch/riscv/core/coredump.c): x0..x31 then pc — GDB order,
+/// which is also the DWARF numbering. v3 = 32-bit; v4 (RV64) is refused (the
+/// engine unwinds 32-bit targets).
+fn parse_riscv_arch(
+    data: &[u8],
+    ver: u16,
+    regs: &mut [Option<u32>; 32],
+    pc: &mut Option<u32>,
+) -> Result<(), String> {
+    if ver != 3 {
+        return Err(format!("RISC-V arch block v{ver} not supported (only v3 / 32-bit)"));
+    }
+    if data.len() < 33 * 4 {
+        return Err("RISC-V arch block too short (expected 33 words)".to_string());
+    }
+    let w = |i: usize| u32::from_le_bytes([data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]]);
+    for (i, reg) in regs.iter_mut().enumerate() {
+        *reg = Some(w(i));
+    }
+    *pc = Some(w(32));
     Ok(())
 }
 
@@ -158,12 +229,15 @@ pub fn backtrace(
 
     let loader = Loader::new(elf).map_err(|e| format!("symbolizer: {e}"))?;
 
+    let arch = start.arch;
+    let sp = arch.sp_dwarf();
     let mut regs = start.regs;
+    let mut pc_reg = start.pc;
     let mut frames = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
     'unwind: for depth in 0..max_frames {
-        let Some(pc) = regs[PC] else { break };
+        let Some(pc) = pc_reg else { break };
         // For a return address (caller frames), step back one byte so the source
         // line is the call site, not the instruction after it.
         let sym_addr = if depth == 0 { pc } else { pc.wrapping_sub(1) };
@@ -203,7 +277,7 @@ pub fn backtrace(
 
         // Recover the caller's registers per the CFI rules for this row.
         let mut next = regs;
-        for i in 0..16 {
+        for i in 0..32 {
             next[i] = match row.register(gimli::Register(i as u16)) {
                 Some(RegisterRule::Undefined) => None,
                 Some(RegisterRule::SameValue) => regs[i],
@@ -220,8 +294,11 @@ pub fn backtrace(
         if ra == 0 {
             break;
         }
-        next[SP] = Some(cfa);
-        next[PC] = Some(ra & !1); // clear the Thumb bit
+        next[sp] = Some(cfa);
+        pc_reg = Some(ra & arch.ret_mask()); // ARM: clear the Thumb bit
+        if arch == Arch::ArmCortexM {
+            next[15] = pc_reg; // on ARM the PC is also DWARF reg 15
+        }
         regs = next;
     }
 
@@ -284,11 +361,53 @@ mod tests {
     #[test]
     fn parses_arm_registers_from_a_real_coredump() {
         let regs = parse_registers(&decode(DUMP_HEX)).unwrap();
+        assert_eq!(regs.arch, Arch::ArmCortexM);
         assert_eq!(regs.reason, 25); // precise bus fault
-        assert_eq!(regs.regs[PC], Some(0x0800_046a));
+        assert_eq!(regs.pc, Some(0x0800_046a));
         assert_eq!(regs.regs[14], Some(0x0800_04b5)); // lr
-        assert_eq!(regs.regs[SP], Some(0x2000_1db8));
+        assert_eq!(regs.regs[13], Some(0x2000_1db8)); // sp
         assert_eq!(regs.regs[3], Some(0xbadc_a000)); // the bad pointer base
+    }
+
+    /// A synthetic RISC-V coredump: ZE header (tgt 4) + v3 arch block with
+    /// x0..x31 then pc, per Zephyr's arch/riscv/core/coredump.c.
+    fn riscv_dump() -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(b"ZE"); // magic
+        d.extend_from_slice(&2u16.to_le_bytes()); // hdr version
+        d.extend_from_slice(&4u16.to_le_bytes()); // target: RISC-V
+        d.push(5); // ptr size (log2 bits, as emitted)
+        d.push(0); // flags
+        d.extend_from_slice(&2u32.to_le_bytes()); // reason: stack overflow
+        d.push(b'A');
+        d.extend_from_slice(&3u16.to_le_bytes()); // arch block v3 (32-bit)
+        d.extend_from_slice(&(33u16 * 4).to_le_bytes()); // num bytes
+        for i in 0..32u32 {
+            d.extend_from_slice(&(0x1000_0000 + i).to_le_bytes()); // x0..x31
+        }
+        d.extend_from_slice(&0x4038_0abcu32.to_le_bytes()); // pc
+        d
+    }
+
+    #[test]
+    fn parses_riscv_registers() {
+        let regs = parse_registers(&riscv_dump()).unwrap();
+        assert_eq!(regs.arch, Arch::RiscV);
+        assert_eq!(regs.reason, 2);
+        assert_eq!(regs.pc, Some(0x4038_0abc));
+        assert_eq!(regs.regs[1], Some(0x1000_0001)); // ra = x1
+        assert_eq!(regs.regs[2], Some(0x1000_0002)); // sp = x2
+        assert_eq!(regs.regs[31], Some(0x1000_001f)); // t6 = x31
+    }
+
+    #[test]
+    fn refuses_unknown_target_instead_of_guessing() {
+        // Same header but target code 5 (Xtensa): must refuse, never decode
+        // with another architecture's table.
+        let mut d = riscv_dump();
+        d[4] = 5;
+        let err = parse_registers(&d).unwrap_err();
+        assert!(err.contains("not implemented"), "{err}");
     }
 
     #[test]
